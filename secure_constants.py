@@ -201,6 +201,34 @@ def is_weak_pattern(value: int, bit_width: int) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
+def check_for_complements(constants: List[int], bit_width: int) -> List[Tuple[int, int]]:
+    """
+    Check if any constants are bitwise complements of each other.
+
+    This is a security vulnerability because a single stuck-at fault affecting
+    all bits (e.g., voltage glitch on bus) can transform A into ~A.
+
+    Args:
+        constants: List of constants
+        bit_width: Bit width of constants
+
+    Returns:
+        List of (index_i, index_j) pairs where constants[i] == ~constants[j]
+    """
+    complement_pairs = []
+    max_val = (1 << bit_width) - 1
+
+    for i in range(len(constants)):
+        for j in range(i + 1, len(constants)):
+            # Calculate bitwise complement within bit_width
+            complement_i = constants[i] ^ max_val
+
+            if complement_i == constants[j]:
+                complement_pairs.append((i, j))
+
+    return complement_pairs
+
+
 def check_set_for_weak_patterns(constants: List[int], bit_width: int) -> List[Tuple[int, int, str]]:
     """
     Check entire set for weak patterns.
@@ -788,12 +816,18 @@ def find_best_candidate(existing: List[int], bit_width: int,
     best_candidate = None
     best_min_distance = 0
     best_avg_distribution = 0.0
+    max_val = (1 << bit_width) - 1
 
     for _ in range(candidates_per_round):
         candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak)
 
         # Skip if duplicate
         if candidate in existing:
+            continue
+
+        # Check if candidate is bitwise complement of any existing constant
+        candidate_complement = candidate ^ max_val
+        if candidate_complement in existing:
             continue
 
         # Calculate minimum distance to existing constants
@@ -1204,6 +1238,19 @@ def print_results(result: GenerationResult, bit_width: int,
         for idx, value, reason in weak_patterns:
             hex_width = (bit_width + 3) // 4
             print(f"  [{idx:2d}]  0x{value:0{hex_width}X}  - {reason}")
+        print(f"{'='*70}\n")
+
+    # Check for bitwise complements
+    complement_pairs = check_for_complements(result.constants, bit_width)
+    if complement_pairs:
+        print(f"{'='*70}")
+        print(f"⚠ CRITICAL: Bitwise complement pairs detected ({len(complement_pairs)} pairs)")
+        print(f"{'='*70}")
+        print("A single stuck-at fault affecting all bits can transform one constant")
+        print("into another, compromising security!\n")
+        hex_width = (bit_width + 3) // 4
+        for i, j in complement_pairs:
+            print(f"  [{i:2d}]  0x{result.constants[i]:0{hex_width}X}  <-->  [{j:2d}]  0x{result.constants[j]:0{hex_width}X}")
         print(f"{'='*70}\n")
 
     # Print theoretical bounds if requested
