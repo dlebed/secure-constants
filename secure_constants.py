@@ -8,8 +8,9 @@ Designed for embedded systems security to resist fault injection attacks.
 import sys
 import argparse
 import secrets
+import random
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 
 
@@ -101,6 +102,124 @@ def calculate_statistics(constants: List[int]) -> Tuple[int, int, float]:
             distances.append(hamming_distance(constants[i], constants[j]))
 
     return min(distances), max(distances), sum(distances) / len(distances)
+
+
+# =============================================================================
+# Weak Pattern Detection
+# =============================================================================
+
+def is_weak_pattern(value: int, bit_width: int) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a constant has weak patterns that reduce security.
+
+    Weak patterns include:
+    - All zeros or all ones
+    - Alternating bits (0xAAAA, 0x5555)
+    - Repeating bytes
+    - Very low or high Hamming weight
+    - Sequential patterns
+
+    Args:
+        value: Constant to check
+        bit_width: Bit width of constant
+
+    Returns:
+        Tuple of (is_weak, reason)
+    """
+    max_val = (1 << bit_width) - 1
+
+    # Check all zeros
+    if value == 0:
+        return True, "all zeros"
+
+    # Check all ones
+    if value == max_val:
+        return True, "all ones"
+
+    # Check Hamming weight (should be reasonably balanced)
+    weight = bin(value).count('1')
+    min_acceptable = bit_width // 4  # At least 25% ones
+    max_acceptable = bit_width - min_acceptable  # At most 75% ones
+
+    if weight < min_acceptable:
+        return True, f"too few ones ({weight}/{bit_width})"
+    if weight > max_acceptable:
+        return True, f"too many ones ({weight}/{bit_width})"
+
+    # Check alternating patterns
+    if bit_width >= 8:
+        # 0xAAAA pattern (10101010...)
+        alternating_10 = 0
+        for i in range(bit_width):
+            if i % 2 == 1:
+                alternating_10 |= (1 << i)
+
+        # 0x5555 pattern (01010101...)
+        alternating_01 = 0
+        for i in range(bit_width):
+            if i % 2 == 0:
+                alternating_01 |= (1 << i)
+
+        if value == alternating_10:
+            return True, "alternating bits (0xAAAA pattern)"
+        if value == alternating_01:
+            return True, "alternating bits (0x5555 pattern)"
+
+    # Check for repeating bytes (8-bit and larger)
+    if bit_width >= 16:
+        byte_mask = 0xFF
+        first_byte = value & byte_mask
+        is_repeating = True
+
+        for i in range(1, bit_width // 8):
+            current_byte = (value >> (i * 8)) & byte_mask
+            if current_byte != first_byte:
+                is_repeating = False
+                break
+
+        if is_repeating:
+            return True, f"repeating bytes (0x{first_byte:02X})"
+
+    # Check for sequential patterns (for 16-bit and larger)
+    if bit_width >= 16:
+        # Check if nibbles are sequential
+        nibbles = []
+        for i in range(bit_width // 4):
+            nibble = (value >> (i * 4)) & 0xF
+            nibbles.append(nibble)
+
+        # Check ascending or descending sequence
+        if len(nibbles) >= 4:
+            is_ascending = all(nibbles[i] + 1 == nibbles[i + 1] for i in range(len(nibbles) - 1))
+            is_descending = all(nibbles[i] - 1 == nibbles[i + 1] for i in range(len(nibbles) - 1))
+
+            if is_ascending:
+                return True, "sequential ascending nibbles"
+            if is_descending:
+                return True, "sequential descending nibbles"
+
+    return False, None
+
+
+def check_set_for_weak_patterns(constants: List[int], bit_width: int) -> List[Tuple[int, int, str]]:
+    """
+    Check entire set for weak patterns.
+
+    Args:
+        constants: List of constants
+        bit_width: Bit width of constants
+
+    Returns:
+        List of (index, value, reason) for weak patterns found
+    """
+    weak_patterns = []
+
+    for i, const in enumerate(constants):
+        is_weak, reason = is_weak_pattern(const, bit_width)
+        if is_weak:
+            weak_patterns.append((i, const, reason))
+
+    return weak_patterns
 
 
 # =============================================================================
@@ -301,13 +420,13 @@ def print_theoretical_bounds(n: int, M: int):
 # Random Number Generation
 # =============================================================================
 
-def generate_random_constant(bit_width: int, rng: secrets.SystemRandom) -> int:
+def generate_random_constant(bit_width: int, rng: Union[secrets.SystemRandom, random.Random]) -> int:
     """
     Generate a cryptographically secure random constant.
 
     Args:
         bit_width: Number of bits
-        rng: Secure random number generator
+        rng: Random number generator (secure or seeded)
 
     Returns:
         Random constant within bit_width
@@ -316,17 +435,19 @@ def generate_random_constant(bit_width: int, rng: secrets.SystemRandom) -> int:
     return rng.randint(0, max_val)
 
 
-def generate_balanced_constant(bit_width: int, rng: secrets.SystemRandom) -> int:
+def generate_balanced_constant(bit_width: int, rng: Union[secrets.SystemRandom, random.Random],
+                               check_weak: bool = True) -> int:
     """
     Generate a constant with roughly balanced bit count (Hamming weight ≈ n/2).
     This is better for security as it avoids degenerate patterns.
 
     Args:
         bit_width: Number of bits
-        rng: Secure random number generator
+        rng: Random number generator
+        check_weak: Whether to reject weak patterns
 
     Returns:
-        Balanced random constant
+        Balanced random constant without weak patterns
     """
     target_ones = bit_width // 2
     tolerance = bit_width // 4
@@ -335,17 +456,27 @@ def generate_balanced_constant(bit_width: int, rng: secrets.SystemRandom) -> int
         candidate = generate_random_constant(bit_width, rng)
         ones_count = bin(candidate).count('1')
 
-        if abs(ones_count - target_ones) <= tolerance:
-            return candidate
+        # Check if balanced
+        if abs(ones_count - target_ones) > tolerance:
+            continue
 
-    # Fallback: just return random
+        # Check for weak patterns if requested
+        if check_weak:
+            is_weak, _ = is_weak_pattern(candidate, bit_width)
+            if is_weak:
+                continue
+
+        return candidate
+
+    # Fallback: just return random (without weak check)
     return generate_random_constant(bit_width, rng)
 
 
 def find_best_candidate(existing: List[int], bit_width: int,
                         min_required_distance: int,
                         candidates_per_round: int,
-                        rng: secrets.SystemRandom) -> Optional[int]:
+                        rng: Union[secrets.SystemRandom, random.Random],
+                        check_weak: bool = True) -> Optional[int]:
     """
     Find the best candidate constant that maximizes minimum distance.
 
@@ -354,7 +485,8 @@ def find_best_candidate(existing: List[int], bit_width: int,
         bit_width: Number of bits
         min_required_distance: Minimum required distance
         candidates_per_round: Number of candidates to test
-        rng: Secure random number generator
+        rng: Random number generator
+        check_weak: Whether to reject weak patterns
 
     Returns:
         Best candidate or None if none meets requirements
@@ -363,7 +495,7 @@ def find_best_candidate(existing: List[int], bit_width: int,
     best_min_distance = 0
 
     for _ in range(candidates_per_round):
-        candidate = generate_balanced_constant(bit_width, rng)
+        candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak)
 
         # Skip if duplicate
         if candidate in existing:
@@ -389,7 +521,8 @@ def generate_constants(bit_width: int,
                       min_required_distance: int,
                       max_attempts: int = 100,
                       candidates_per_round: int = 1000,
-                      seed: Optional[int] = None) -> GenerationResult:
+                      seed: Optional[int] = None,
+                      check_weak: bool = True) -> GenerationResult:
     """
     Generate a set of constants with specified minimum Hamming distance.
 
@@ -400,15 +533,16 @@ def generate_constants(bit_width: int,
         max_attempts: Maximum number of generation attempts
         candidates_per_round: Number of candidates to test per round
         seed: Optional random seed for reproducibility
+        check_weak: Whether to reject weak patterns (default: True)
 
     Returns:
         GenerationResult with constants and statistics
     """
-    rng = secrets.SystemRandom()
+    # Use seeded RNG if seed provided, otherwise use cryptographically secure RNG
     if seed is not None:
-        # Note: secrets.SystemRandom doesn't support seeding, but we keep
-        # the parameter for potential future use with a different RNG
-        pass
+        rng = random.Random(seed)
+    else:
+        rng = secrets.SystemRandom()
 
     best_result = None
     best_achieved_distance = 0
@@ -417,14 +551,14 @@ def generate_constants(bit_width: int,
         constants = []
 
         # Generate first constant
-        constants.append(generate_balanced_constant(bit_width, rng))
+        constants.append(generate_balanced_constant(bit_width, rng, check_weak=check_weak))
 
         # Greedily add remaining constants
         success = True
         for _ in range(num_constants - 1):
             candidate = find_best_candidate(
                 constants, bit_width, min_required_distance,
-                candidates_per_round, rng
+                candidates_per_round, rng, check_weak=check_weak
             )
 
             if candidate is None:
@@ -473,7 +607,8 @@ def generate_constants(bit_width: int,
 def auto_discover_max_distance(bit_width: int, num_constants: int,
                               max_attempts: int = 100,
                               candidates_per_round: int = 1000,
-                              seed: Optional[int] = None) -> Tuple[int, GenerationResult]:
+                              seed: Optional[int] = None,
+                              check_weak: bool = True) -> Tuple[int, GenerationResult]:
     """
     Auto-discover the maximum achievable minimum distance.
 
@@ -485,6 +620,7 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
         max_attempts: Maximum attempts per distance value
         candidates_per_round: Candidates to test per round
         seed: Optional random seed
+        check_weak: Whether to reject weak patterns
 
     Returns:
         Tuple of (achieved_distance, generation_result)
@@ -505,7 +641,8 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
             min_required_distance=target_distance,
             max_attempts=max_attempts,
             candidates_per_round=candidates_per_round,
-            seed=seed
+            seed=seed,
+            check_weak=check_weak
         )
 
         if result.success:
@@ -568,7 +705,8 @@ def validate_parameters(bit_width: int, num_constants: int,
 
 
 def format_c_enum(constants: List[int], bit_width: int,
-                 enum_name: str = "SecureConstants") -> str:
+                 enum_name: str = "SecureConstants",
+                 prefix: str = "SECURE_CONST") -> str:
     """
     Format constants as C enumeration.
 
@@ -576,6 +714,7 @@ def format_c_enum(constants: List[int], bit_width: int,
         constants: List of constants
         bit_width: Bit width of constants
         enum_name: Name of the enum
+        prefix: Prefix for constant names (default: SECURE_CONST)
 
     Returns:
         C enum definition as string
@@ -605,7 +744,7 @@ def format_c_enum(constants: List[int], bit_width: int,
 
     for i, const in enumerate(constants):
         weight = bin(const).count('1')
-        lines.append(f"    SECURE_CONST_{i:02d} = 0x{const:0{hex_width}X}{type_suffix},  /* weight: {weight} */")
+        lines.append(f"    {prefix}_{i:02d} = 0x{const:0{hex_width}X}{type_suffix},  /* weight: {weight} */")
 
     lines.append("};")
 
@@ -620,7 +759,7 @@ def format_c_defines(constants: List[int], bit_width: int,
     Args:
         constants: List of constants
         bit_width: Bit width of constants
-        prefix: Prefix for define names
+        prefix: Prefix for define names (default: SECURE_CONST)
 
     Returns:
         C #define statements as string
@@ -657,7 +796,7 @@ def format_c_defines(constants: List[int], bit_width: int,
 def print_results(result: GenerationResult, bit_width: int,
                  num_constants: int, min_required_distance: Optional[int],
                  show_bounds: bool = False, auto_mode: bool = False,
-                 output_format: str = "default"):
+                 output_format: str = "default", prefix: str = "SECURE_CONST"):
     """
     Print generation results in a formatted way.
 
@@ -669,6 +808,7 @@ def print_results(result: GenerationResult, bit_width: int,
         show_bounds: Whether to show theoretical bounds
         auto_mode: Whether this was auto-discovery mode
         output_format: Output format ("default", "c-enum", "c-define")
+        prefix: Prefix for C constant names
     """
     if not result.success:
         if min_required_distance is not None:
@@ -716,6 +856,17 @@ def print_results(result: GenerationResult, bit_width: int,
     print(f"  Average distance: {result.avg_distance:.2f}")
     print(f"{'='*70}\n")
 
+    # Check for weak patterns
+    weak_patterns = check_set_for_weak_patterns(result.constants, bit_width)
+    if weak_patterns:
+        print(f"{'='*70}")
+        print(f"WARNING: Weak patterns detected ({len(weak_patterns)} constants)")
+        print(f"{'='*70}")
+        for idx, value, reason in weak_patterns:
+            hex_width = (bit_width + 3) // 4
+            print(f"  [{idx:2d}]  0x{value:0{hex_width}X}  - {reason}")
+        print(f"{'='*70}\n")
+
     # Print theoretical bounds if requested
     if show_bounds:
         print_theoretical_bounds(bit_width, num_constants)
@@ -743,13 +894,13 @@ def print_results(result: GenerationResult, bit_width: int,
         print(f"{'='*70}")
         print("C Enumeration Format:")
         print(f"{'='*70}\n")
-        print(format_c_enum(result.constants, bit_width))
+        print(format_c_enum(result.constants, bit_width, prefix=prefix))
         print()
     elif output_format == "c-define":
         print(f"{'='*70}")
         print("C #define Format:")
         print(f"{'='*70}\n")
-        print(format_c_defines(result.constants, bit_width))
+        print(format_c_defines(result.constants, bit_width, prefix=prefix))
         print()
 
 
@@ -798,6 +949,8 @@ Examples:
                        choices=['default', 'c-enum', 'c-define'],
                        default='default',
                        help='Output format: default (detailed), c-enum (C enumeration), c-define (C #define)')
+    parser.add_argument('-p', '--prefix', type=str, default='SECURE_CONST',
+                       help='Prefix for C constant names (default: SECURE_CONST)')
 
     args = parser.parse_args()
 
@@ -822,7 +975,7 @@ Examples:
 
         if result.success:
             print()  # Blank line before results
-            print_results(result, args.bits, args.count, achieved_distance, args.show_bounds, auto_mode=True, output_format=args.output_format)
+            print_results(result, args.bits, args.count, achieved_distance, args.show_bounds, auto_mode=True, output_format=args.output_format, prefix=args.prefix)
             return 0
         else:
             print(f"\nERROR: Failed to generate constants even with minimum distance requirements")
@@ -842,7 +995,7 @@ Examples:
         )
 
         # Print results
-        print_results(result, args.bits, args.count, args.min_distance, args.show_bounds, auto_mode=False, output_format=args.output_format)
+        print_results(result, args.bits, args.count, args.min_distance, args.show_bounds, auto_mode=False, output_format=args.output_format, prefix=args.prefix)
 
         # Return appropriate exit code
         return 0 if result.success else 1

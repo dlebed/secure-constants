@@ -6,12 +6,14 @@ Designed for embedded systems security use cases to provide resistance against h
 ## Features
 
 - **Auto-Discovery Mode**: Automatically finds maximum achievable distance
-- **C Code Output**: Generate ready-to-use C enums or #defines (NEW!)
+- **C Code Output**: Generate ready-to-use C enums or #defines with customizable prefixes
+- **Weak Pattern Detection**: Automatically avoids cryptographically weak patterns (all zeros/ones, alternating bits, repeating bytes, extreme Hamming weights)
 - **Maximum Hamming Distance**: Generates constants with the largest possible pairwise Hamming distances
 - **Guaranteed Minimum Distance**: Enforces a required minimum distance or fails with error
 - **Theoretical Bounds Validation**: Uses Singleton, Hamming, and Plotkin bounds to validate parameters
 - **Flexible Bit Widths**: Supports 8 to 64-bit constants
 - **Security-Focused**: Uses cryptographically secure random number generation
+- **Reproducible Generation**: Optional seed parameter for deterministic output
 - **Balanced Bit Distribution**: Prefers constants with roughly equal 0s and 1s for better security properties
 - **Comprehensive Output**: Provides hex values, distance matrix, and statistics
 
@@ -62,6 +64,7 @@ python3 secure_constants.py --bits <BIT_WIDTH> --count <NUM_CONSTANTS> --min-dis
 
 - `-m, --min-distance`: Minimum required Hamming distance (if not specified, auto-discovers maximum)
 - `-f, --format`: Output format - `default`, `c-enum`, or `c-define` (default: default)
+- `-p, --prefix`: Prefix for C constant names (default: SECURE_CONST)
 - `-a, --attempts`: Maximum generation attempts (default: 100)
 - `--candidates`: Candidates to test per round (default: 1000)
 - `-s, --seed`: Random seed for reproducibility
@@ -123,6 +126,25 @@ python3 secure_constants.py -b 16 -c 5
 python3 secure_constants.py -b 8 -c 4 -m 4
 ```
 
+### Reproducible Generation
+
+Use the `--seed` parameter to generate identical constants across runs:
+
+```bash
+# First run
+python3 secure_constants.py -b 16 -c 5 -s 12345
+
+# Second run with same seed - produces identical constants
+python3 secure_constants.py -b 16 -c 5 -s 12345
+```
+
+**Use cases**:
+- Version control: Track exact constants used in each firmware version
+- Testing: Reproducible test vectors
+- Compliance: Auditable generation process
+
+**Note**: Without `--seed`, the tool uses cryptographically secure random generation (default behavior).
+
 ### C Code Output Formats
 
 When using `--format c-enum` or `--format c-define`, the utility shows:
@@ -176,12 +198,31 @@ C #define Format:
 #define SECURE_CONST_04  0x8FBDU  /* weight: 11 */
 ```
 
+#### Custom Prefix for C Output
+
+Use `--prefix` to customize constant names for your application:
+
+```bash
+python3 secure_constants.py -b 16 -c 4 --format c-enum --prefix FSM_STATE
+```
+
+Output:
+```c
+enum SecureConstants {
+    FSM_STATE_00 = 0x473BU,  /* weight: 9 */
+    FSM_STATE_01 = 0x78C0U,  /* weight: 6 */
+    FSM_STATE_02 = 0x8ED5U,  /* weight: 9 */
+    FSM_STATE_03 = 0x882EU,  /* weight: 6 */
+};
+```
+
 **Features of C output formats**:
 - Shows complete statistics and distance matrix first
 - C code appears at the end for easy extraction
 - Proper type suffixes: `U` (8/16-bit), `UL` (32-bit), `ULL` (64-bit)
 - Comments with Hamming weight for each constant
 - Header comment with total count and minimum distance
+- Customizable prefix for application-specific naming (e.g., `STATE_`, `CMD_`, `MAGIC_`)
 
 ### Handle Impossible Constraints
 
@@ -260,8 +301,14 @@ The utility uses a **greedy algorithm with random restart**:
 
 ### Security Properties
 
-- Uses `secrets.SystemRandom()` for cryptographically secure randomness
-- Prefers balanced constants to avoid degenerate patterns (all 0s, all 1s)
+- Uses `secrets.SystemRandom()` for cryptographically secure randomness (or `random.Random(seed)` when seed specified)
+- **Weak pattern detection**: Automatically rejects constants with cryptographically weak patterns:
+  - All zeros or all ones
+  - Alternating bit patterns (0xAAAA, 0x5555)
+  - Repeating bytes (0x12121212)
+  - Sequential nibble patterns
+  - Extreme Hamming weights (too few or too many bits set)
+- Prefers balanced constants to avoid degenerate patterns
 - Validates uniqueness of all generated constants
 
 ## Theoretical Limits
@@ -336,9 +383,11 @@ See [BOUNDS_THEORY.md](BOUNDS_THEORY.md) for detailed mathematical explanations,
 4. **C Code Generation**:
    - Use `--format c-enum` for type-safe enumerations
    - Use `--format c-define` for preprocessor constants
+   - Use `--prefix` to customize constant names (e.g., `--prefix STATE` for `STATE_00`, `STATE_01`)
    - Always review statistics to verify minimum distance achieved
    - C code appears at end of output for easy copying to header files
    - Include generated header in your embedded firmware project
+   - Use `--seed` for reproducible builds tracked in version control
 
 ## Integrating into Embedded Projects
 
