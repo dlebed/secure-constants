@@ -223,6 +223,293 @@ def check_set_for_weak_patterns(constants: List[int], bit_width: int) -> List[Tu
 
 
 # =============================================================================
+# Bit Difference Clustering Analysis
+# =============================================================================
+
+def analyze_bit_clustering(value1: int, value2: int, bit_width: int) -> dict:
+    """
+    Analyze spatial distribution of bit differences between two values.
+
+    Detects clustering of bit differences which could make fault injection
+    attacks easier by targeting specific regions (bytes, nibbles, power rails).
+
+    Args:
+        value1: First constant
+        value2: Second constant
+        bit_width: Bit width of constants
+
+    Returns:
+        Dictionary with clustering metrics:
+        - max_cluster_size: Longest run of consecutive differing bits
+        - max_gap: Largest gap between differing bits
+        - byte_coverage: Fraction of bytes that contain at least one difference (0.0-1.0)
+        - distribution_variance: Variance of differences across bytes (lower = more even)
+        - differing_bits: Total Hamming distance
+        - diff_positions: List of bit positions that differ
+    """
+    xor = value1 ^ value2
+
+    # Get positions of differing bits (LSB = position 0)
+    diff_positions = [i for i in range(bit_width) if (xor >> i) & 1]
+
+    if len(diff_positions) == 0:
+        return {
+            'max_cluster_size': 0,
+            'max_gap': 0,
+            'byte_coverage': 0.0,
+            'distribution_variance': 0.0,
+            'differing_bits': 0,
+            'diff_positions': []
+        }
+
+    if len(diff_positions) == 1:
+        num_bytes = (bit_width + 7) // 8
+        return {
+            'max_cluster_size': 1,
+            'max_gap': 0,
+            'byte_coverage': 1.0 / num_bytes,
+            'distribution_variance': 0.0,
+            'differing_bits': 1,
+            'diff_positions': diff_positions
+        }
+
+    # Calculate gaps between consecutive differing bits
+    gaps = [diff_positions[i+1] - diff_positions[i]
+            for i in range(len(diff_positions)-1)]
+
+    # Find maximum run of consecutive bits (cluster size)
+    max_cluster = 1
+    current_cluster = 1
+    for i in range(1, len(diff_positions)):
+        if diff_positions[i] == diff_positions[i-1] + 1:
+            current_cluster += 1
+            max_cluster = max(max_cluster, current_cluster)
+        else:
+            current_cluster = 1
+
+    # Byte-level distribution analysis
+    num_bytes = (bit_width + 7) // 8
+    bytes_with_diffs = set()
+    byte_counts = [0] * num_bytes
+
+    for pos in diff_positions:
+        byte_idx = pos // 8
+        bytes_with_diffs.add(byte_idx)
+        byte_counts[byte_idx] += 1
+
+    byte_coverage = len(bytes_with_diffs) / num_bytes
+
+    # Calculate variance (measure of evenness across bytes)
+    # Lower variance = more evenly distributed
+    mean_per_byte = len(diff_positions) / num_bytes
+    variance = sum((c - mean_per_byte)**2 for c in byte_counts) / num_bytes
+
+    return {
+        'max_cluster_size': max_cluster,
+        'max_gap': max(gaps),
+        'byte_coverage': byte_coverage,
+        'distribution_variance': variance,
+        'differing_bits': len(diff_positions),
+        'diff_positions': diff_positions
+    }
+
+
+def calculate_distribution_score(clustering_info: dict, bit_width: int) -> float:
+    """
+    Calculate quality score (0-100) for bit difference distribution.
+
+    Higher scores indicate better-distributed differences, which provide
+    better security against localized fault injection attacks.
+
+    Scoring factors:
+    - Penalizes large clusters of consecutive differences
+    - Rewards broad byte coverage
+    - Penalizes uneven distribution across bytes
+
+    Args:
+        clustering_info: Output from analyze_bit_clustering()
+        bit_width: Bit width of constants
+
+    Returns:
+        Quality score from 0 (worst clustering) to 100 (perfect distribution)
+    """
+    hamming_dist = clustering_info['differing_bits']
+    if hamming_dist == 0:
+        return 0.0
+
+    # Start with perfect score
+    score = 100.0
+
+    # Penalize large clusters (consecutive runs)
+    # A cluster of size k out of d total differences is bad
+    cluster_ratio = clustering_info['max_cluster_size'] / hamming_dist
+    cluster_penalty = cluster_ratio * 40.0  # Up to -40 points
+    score -= cluster_penalty
+
+    # Reward good byte coverage
+    # Perfect coverage (all bytes have diffs) = no penalty
+    # Poor coverage = penalty
+    coverage_penalty = (1.0 - clustering_info['byte_coverage']) * 30.0  # Up to -30 points
+    score -= coverage_penalty
+
+    # Penalize high variance (uneven distribution)
+    # Normalize variance by hamming distance
+    normalized_variance = clustering_info['distribution_variance'] / max(hamming_dist, 1)
+    variance_penalty = min(normalized_variance * 20.0, 30.0)  # Up to -30 points
+    score -= variance_penalty
+
+    return max(0.0, min(100.0, score))
+
+
+def visualize_bit_differences(value1: int, value2: int, bit_width: int,
+                               label1: str = "A", label2: str = "B") -> str:
+    """
+    Generate ASCII visualization of bit difference positions.
+
+    Shows where bits differ between two values, grouped by bytes for readability.
+    Useful for identifying clustering patterns visually.
+
+    Args:
+        value1: First constant
+        value2: Second constant
+        bit_width: Bit width of constants
+        label1: Label for first value
+        label2: Label for second value
+
+    Returns:
+        Multi-line string with visualization
+    """
+    xor = value1 ^ value2
+    num_bytes = (bit_width + 7) // 8
+
+    lines = []
+
+    # Hex values
+    hex_width = (bit_width + 3) // 4
+    lines.append(f"  {label1}: 0x{value1:0{hex_width}X}")
+    lines.append(f"  {label2}: 0x{value2:0{hex_width}X}")
+    lines.append(f"  XOR: 0x{xor:0{hex_width}X}")
+    lines.append("")
+
+    # Bit difference map (X = different, . = same)
+    lines.append("  Bit difference map (X = different, . = same):")
+    line = "  "
+
+    # Print bytes from high to low (left to right)
+    for byte_idx in range(num_bytes - 1, -1, -1):
+        for bit_idx in range(7, -1, -1):
+            pos = byte_idx * 8 + bit_idx
+            if pos < bit_width:
+                if (xor >> pos) & 1:
+                    line += "X"
+                else:
+                    line += "."
+        line += " "
+
+    lines.append(line)
+
+    # Byte labels
+    byte_line = "  Byte: "
+    for byte_idx in range(num_bytes - 1, -1, -1):
+        byte_line += f"{byte_idx:^8} "
+    lines.append(byte_line)
+
+    return "\n".join(lines)
+
+
+def print_clustering_analysis(constants: List[int], bit_width: int,
+                              show_details: bool = False, threshold: float = 60.0):
+    """
+    Print clustering analysis for all pairs of generated constants.
+
+    Identifies pairs with poor bit difference distribution that may be
+    vulnerable to localized fault injection attacks.
+
+    Args:
+        constants: List of generated constants
+        bit_width: Bit width of constants
+        show_details: If True, show detailed analysis of worst pairs
+        threshold: Score threshold below which to flag pairs (0-100)
+    """
+    if len(constants) < 2:
+        return
+
+    print("\n" + "="*70)
+    print("Bit Difference Distribution Analysis:")
+    print("="*70)
+
+    # Analyze all pairs
+    pair_analyses = []
+    total_pairs = 0
+
+    for i in range(len(constants)):
+        for j in range(i+1, len(constants)):
+            total_pairs += 1
+            cluster_info = analyze_bit_clustering(constants[i], constants[j], bit_width)
+            score = calculate_distribution_score(cluster_info, bit_width)
+            pair_analyses.append((i, j, score, cluster_info))
+
+    # Sort by score (worst first)
+    pair_analyses.sort(key=lambda x: x[2])
+
+    # Count pairs by quality
+    excellent = sum(1 for _, _, score, _ in pair_analyses if score >= 80)
+    good = sum(1 for _, _, score, _ in pair_analyses if 60 <= score < 80)
+    fair = sum(1 for _, _, score, _ in pair_analyses if 40 <= score < 60)
+    poor = sum(1 for _, _, score, _ in pair_analyses if score < 40)
+
+    # Calculate statistics
+    avg_score = sum(score for _, _, score, _ in pair_analyses) / total_pairs
+    avg_cluster = sum(info['max_cluster_size'] for _, _, _, info in pair_analyses) / total_pairs
+    avg_coverage = sum(info['byte_coverage'] for _, _, _, info in pair_analyses) / total_pairs
+
+    print(f"\nOverall Statistics ({total_pairs} pairs analyzed):")
+    print(f"  Average distribution score: {avg_score:.1f}/100")
+    print(f"  Average max cluster size: {avg_cluster:.1f} bits")
+    print(f"  Average byte coverage: {avg_coverage*100:.1f}%")
+    print(f"\nQuality Distribution:")
+    print(f"  Excellent (≥80): {excellent:3d} pairs ({excellent*100/total_pairs:.1f}%)")
+    print(f"  Good (60-79):    {good:3d} pairs ({good*100/total_pairs:.1f}%)")
+    print(f"  Fair (40-59):    {fair:3d} pairs ({fair*100/total_pairs:.1f}%)")
+    print(f"  Poor (<40):      {poor:3d} pairs ({poor*100/total_pairs:.1f}%)")
+
+    # Flag problematic pairs
+    flagged = [p for p in pair_analyses if p[2] < threshold]
+
+    if flagged:
+        print(f"\n⚠ WARNING: {len(flagged)} pairs below quality threshold ({threshold:.0f}):")
+
+        # Show up to 5 worst pairs
+        num_to_show = min(5, len(flagged)) if not show_details else len(flagged)
+
+        for idx, (i, j, score, info) in enumerate(flagged[:num_to_show]):
+            print(f"\n  Pair #{idx+1}: [{i:2d}] vs [{j:2d}]  Score: {score:.1f}/100")
+            print(f"    Hamming distance: {info['differing_bits']}")
+            print(f"    Max cluster: {info['max_cluster_size']} consecutive bits")
+            print(f"    Byte coverage: {info['byte_coverage']*100:.1f}%")
+            print(f"    Distribution variance: {info['distribution_variance']:.2f}")
+
+            if show_details:
+                # Show visual representation
+                print(visualize_bit_differences(constants[i], constants[j], bit_width,
+                                               f"[{i:2d}]", f"[{j:2d}]"))
+
+        if len(flagged) > num_to_show and not show_details:
+            print(f"\n  ... and {len(flagged) - num_to_show} more pairs")
+            print("  (Use --show-clustering for detailed analysis)")
+    else:
+        print(f"\n✓ All constant pairs have well-distributed bit differences (≥{threshold:.0f})")
+
+    # Show best pair as example
+    if pair_analyses:
+        best_i, best_j, best_score, best_info = pair_analyses[-1]
+        print(f"\nBest distributed pair: [{best_i:2d}] vs [{best_j:2d}]  Score: {best_score:.1f}/100")
+        if show_details:
+            print(visualize_bit_differences(constants[best_i], constants[best_j], bit_width,
+                                           f"[{best_i:2d}]", f"[{best_j:2d}]"))
+
+
+# =============================================================================
 # Theoretical Bounds Calculators
 # =============================================================================
 
@@ -476,9 +763,14 @@ def find_best_candidate(existing: List[int], bit_width: int,
                         min_required_distance: int,
                         candidates_per_round: int,
                         rng: Union[secrets.SystemRandom, random.Random],
-                        check_weak: bool = True) -> Optional[int]:
+                        check_weak: bool = True,
+                        check_clustering: bool = False,
+                        min_distribution_score: float = 40.0) -> Optional[int]:
     """
     Find the best candidate constant that maximizes minimum distance.
+
+    Optionally also considers bit difference clustering to prefer
+    candidates with well-distributed differences.
 
     Args:
         existing: List of existing constants
@@ -487,12 +779,15 @@ def find_best_candidate(existing: List[int], bit_width: int,
         candidates_per_round: Number of candidates to test
         rng: Random number generator
         check_weak: Whether to reject weak patterns
+        check_clustering: Whether to check bit difference clustering
+        min_distribution_score: Minimum distribution score (0-100) when check_clustering=True
 
     Returns:
         Best candidate or None if none meets requirements
     """
     best_candidate = None
     best_min_distance = 0
+    best_avg_distribution = 0.0
 
     for _ in range(candidates_per_round):
         candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak)
@@ -507,11 +802,40 @@ def find_best_candidate(existing: List[int], bit_width: int,
         else:
             min_dist = bit_width  # First constant, use max possible
 
-        # Check if meets minimum requirement
-        if min_dist >= min_required_distance:
-            if min_dist > best_min_distance:
-                best_candidate = candidate
-                best_min_distance = min_dist
+        # Check if meets minimum distance requirement
+        if min_dist < min_required_distance:
+            continue
+
+        # Calculate distribution quality if clustering check enabled
+        avg_distribution = 100.0  # Default to perfect if not checking
+        if check_clustering and existing:
+            distribution_scores = []
+            for const in existing:
+                cluster_info = analyze_bit_clustering(candidate, const, bit_width)
+                score = calculate_distribution_score(cluster_info, bit_width)
+                distribution_scores.append(score)
+
+            avg_distribution = sum(distribution_scores) / len(distribution_scores)
+
+            # Skip candidates with poor distribution
+            if avg_distribution < min_distribution_score:
+                continue
+
+        # Select best candidate based on:
+        # 1. Primary: Hamming distance
+        # 2. Secondary: Distribution score (if checking clustering)
+        is_better = False
+        if min_dist > best_min_distance:
+            is_better = True
+        elif min_dist == best_min_distance and check_clustering:
+            # Same distance, prefer better distribution
+            if avg_distribution > best_avg_distribution:
+                is_better = True
+
+        if is_better:
+            best_candidate = candidate
+            best_min_distance = min_dist
+            best_avg_distribution = avg_distribution
 
     return best_candidate
 
@@ -522,7 +846,9 @@ def generate_constants(bit_width: int,
                       max_attempts: int = 100,
                       candidates_per_round: int = 1000,
                       seed: Optional[int] = None,
-                      check_weak: bool = True) -> GenerationResult:
+                      check_weak: bool = True,
+                      check_clustering: bool = False,
+                      min_distribution_score: float = 40.0) -> GenerationResult:
     """
     Generate a set of constants with specified minimum Hamming distance.
 
@@ -534,6 +860,8 @@ def generate_constants(bit_width: int,
         candidates_per_round: Number of candidates to test per round
         seed: Optional random seed for reproducibility
         check_weak: Whether to reject weak patterns (default: True)
+        check_clustering: Whether to check bit difference clustering (default: False)
+        min_distribution_score: Minimum distribution score when check_clustering=True (default: 40.0)
 
     Returns:
         GenerationResult with constants and statistics
@@ -558,7 +886,9 @@ def generate_constants(bit_width: int,
         for _ in range(num_constants - 1):
             candidate = find_best_candidate(
                 constants, bit_width, min_required_distance,
-                candidates_per_round, rng, check_weak=check_weak
+                candidates_per_round, rng, check_weak=check_weak,
+                check_clustering=check_clustering,
+                min_distribution_score=min_distribution_score
             )
 
             if candidate is None:
@@ -608,7 +938,9 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
                               max_attempts: int = 100,
                               candidates_per_round: int = 1000,
                               seed: Optional[int] = None,
-                              check_weak: bool = True) -> Tuple[int, GenerationResult]:
+                              check_weak: bool = True,
+                              check_clustering: bool = False,
+                              min_distribution_score: float = 40.0) -> Tuple[int, GenerationResult]:
     """
     Auto-discover the maximum achievable minimum distance.
 
@@ -621,6 +953,8 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
         candidates_per_round: Candidates to test per round
         seed: Optional random seed
         check_weak: Whether to reject weak patterns
+        check_clustering: Whether to check bit difference clustering
+        min_distribution_score: Minimum distribution score when check_clustering=True
 
     Returns:
         Tuple of (achieved_distance, generation_result)
@@ -642,7 +976,9 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
             max_attempts=max_attempts,
             candidates_per_round=candidates_per_round,
             seed=seed,
-            check_weak=check_weak
+            check_weak=check_weak,
+            check_clustering=check_clustering,
+            min_distribution_score=min_distribution_score
         )
 
         if result.success:
@@ -796,7 +1132,8 @@ def format_c_defines(constants: List[int], bit_width: int,
 def print_results(result: GenerationResult, bit_width: int,
                  num_constants: int, min_required_distance: Optional[int],
                  show_bounds: bool = False, auto_mode: bool = False,
-                 output_format: str = "default", prefix: str = "SECURE_CONST"):
+                 output_format: str = "default", prefix: str = "SECURE_CONST",
+                 show_clustering: bool = False, clustering_threshold: float = 60.0):
     """
     Print generation results in a formatted way.
 
@@ -809,6 +1146,8 @@ def print_results(result: GenerationResult, bit_width: int,
         auto_mode: Whether this was auto-discovery mode
         output_format: Output format ("default", "c-enum", "c-define")
         prefix: Prefix for C constant names
+        show_clustering: Whether to show bit difference clustering analysis
+        clustering_threshold: Score threshold for flagging pairs (default: 60.0)
     """
     if not result.success:
         if min_required_distance is not None:
@@ -889,6 +1228,11 @@ def print_results(result: GenerationResult, bit_width: int,
         print()
     print()
 
+    # Add clustering analysis if requested
+    if show_clustering:
+        print_clustering_analysis(result.constants, bit_width,
+                                 show_details=True, threshold=clustering_threshold)
+
     # Add C format output at the end if requested
     if output_format == "c-enum":
         print(f"{'='*70}")
@@ -951,6 +1295,12 @@ Examples:
                        help='Output format: default (detailed), c-enum (C enumeration), c-define (C #define)')
     parser.add_argument('-p', '--prefix', type=str, default='SECURE_CONST',
                        help='Prefix for C constant names (default: SECURE_CONST)')
+    parser.add_argument('--check-clustering', action='store_true',
+                       help='Enable bit difference clustering optimization during generation')
+    parser.add_argument('--min-distribution-score', type=float, default=40.0,
+                       help='Minimum distribution quality score when --check-clustering enabled (0-100, default: 40)')
+    parser.add_argument('--show-clustering', action='store_true',
+                       help='Show detailed bit difference clustering analysis in output')
 
     args = parser.parse_args()
 
@@ -970,12 +1320,16 @@ Examples:
             num_constants=args.count,
             max_attempts=args.attempts,
             candidates_per_round=args.candidates,
-            seed=args.seed
+            seed=args.seed,
+            check_clustering=args.check_clustering,
+            min_distribution_score=args.min_distribution_score
         )
 
         if result.success:
             print()  # Blank line before results
-            print_results(result, args.bits, args.count, achieved_distance, args.show_bounds, auto_mode=True, output_format=args.output_format, prefix=args.prefix)
+            print_results(result, args.bits, args.count, achieved_distance, args.show_bounds, auto_mode=True,
+                         output_format=args.output_format, prefix=args.prefix,
+                         show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score)
             return 0
         else:
             print(f"\nERROR: Failed to generate constants even with minimum distance requirements")
@@ -991,11 +1345,15 @@ Examples:
             min_required_distance=args.min_distance,
             max_attempts=args.attempts,
             candidates_per_round=args.candidates,
-            seed=args.seed
+            seed=args.seed,
+            check_clustering=args.check_clustering,
+            min_distribution_score=args.min_distribution_score
         )
 
         # Print results
-        print_results(result, args.bits, args.count, args.min_distance, args.show_bounds, auto_mode=False, output_format=args.output_format, prefix=args.prefix)
+        print_results(result, args.bits, args.count, args.min_distance, args.show_bounds, auto_mode=False,
+                     output_format=args.output_format, prefix=args.prefix,
+                     show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score)
 
         # Return appropriate exit code
         return 0 if result.success else 1

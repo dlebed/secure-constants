@@ -6,6 +6,7 @@ Designed for embedded systems security use cases to provide resistance against h
 ## Features
 
 - **Auto-Discovery Mode**: Automatically finds maximum achievable distance
+- **Clustering Analysis & Optimization**: Detects and prevents clustered bit differences for enhanced fault injection resistance
 - **C Code Output**: Generate ready-to-use C enums or #defines with customizable prefixes
 - **Weak Pattern Detection**: Automatically avoids cryptographically weak patterns (all zeros/ones, alternating bits, repeating bytes, extreme Hamming weights)
 - **Maximum Hamming Distance**: Generates constants with the largest possible pairwise Hamming distances
@@ -15,13 +16,14 @@ Designed for embedded systems security use cases to provide resistance against h
 - **Security-Focused**: Uses cryptographically secure random number generation
 - **Reproducible Generation**: Optional seed parameter for deterministic output
 - **Balanced Bit Distribution**: Prefers constants with roughly equal 0s and 1s for better security properties
-- **Comprehensive Output**: Provides hex values, distance matrix, and statistics
+- **Comprehensive Output**: Provides hex values, distance matrix, statistics, and clustering analysis
 
 ## Security Applications
 
 This tool is designed for embedded systems security scenarios:
 
-- **Fault Injection Resistance**: Constants with high Hamming distance make it harder to glitch one value into another
+- **Fault Injection Resistance**: Constants with high Hamming distance and well-distributed bit differences make it harder to glitch one value into another
+- **Localized Attack Protection**: Clustering analysis prevents concentration of bit differences in specific bytes/regions vulnerable to targeted attacks
 - **State Machine Security**: Use as magic numbers for secure state transitions
 - **Error Detection**: Corrupted constants are more likely to be detected
 - **Command Validation**: Secure command codes that resist bit-flip attacks
@@ -69,6 +71,9 @@ python3 secure_constants.py --bits <BIT_WIDTH> --count <NUM_CONSTANTS> --min-dis
 - `--candidates`: Candidates to test per round (default: 1000)
 - `-s, --seed`: Random seed for reproducibility
 - `--show-bounds`: Display theoretical bounds (Singleton, Hamming, Plotkin)
+- `--check-clustering`: Enable clustering optimization during generation
+- `--min-distribution-score`: Minimum distribution quality score when using `--check-clustering` (0-100, default: 40)
+- `--show-clustering`: Display detailed clustering analysis in output
 
 ## Examples
 
@@ -144,6 +149,71 @@ python3 secure_constants.py -b 16 -c 5 -s 12345
 - Compliance: Auditable generation process
 
 **Note**: Without `--seed`, the tool uses cryptographically secure random generation (default behavior).
+
+### Clustering Analysis and Optimization
+
+Detect and prevent clustered bit differences that could make localized fault injection attacks easier.
+
+#### Show Clustering Analysis
+
+View distribution quality of bit differences:
+
+```bash
+python3 secure_constants.py -b 32 -c 10 --show-clustering
+```
+
+Output includes clustering report:
+```
+======================================================================
+Bit Difference Distribution Analysis:
+======================================================================
+
+Overall Statistics (45 pairs analyzed):
+  Average distribution score: 88.7/100
+  Average max cluster size: 4.4 bits
+  Average byte coverage: 100.0%
+
+Quality Distribution:
+  Excellent (≥80):  42 pairs (93.3%)
+  Good (60-79):      3 pairs (6.7%)
+  Fair (40-59):      0 pairs (0.0%)
+  Poor (<40):        0 pairs (0.0%)
+
+Best distributed pair: [ 0] vs [ 5]  Score: 94.4/100
+  [ 0]: 0x7D9510A7
+  [ 5]: 0xC80FC481
+  XOR: 0xB59AD426
+
+  Bit difference map (X = different, . = same):
+  X.XX.X.X X..XX.X. XX.X.X.. ..X..XX.
+  Byte:    3        2        1        0
+```
+
+#### Enable Clustering Optimization
+
+Generate constants with optimized bit difference distribution:
+
+```bash
+# Enable clustering optimization (rejects poorly distributed candidates)
+python3 secure_constants.py -b 32 -c 10 --check-clustering
+
+# Use stricter threshold (higher quality requirement)
+python3 secure_constants.py -b 32 -c 10 --check-clustering --min-distribution-score 70
+
+# Show both optimization and analysis
+python3 secure_constants.py -b 32 -c 10 --check-clustering --show-clustering
+```
+
+**Distribution Score Metrics:**
+- **Excellent (≥80)**: Well-distributed differences across all bytes, small clusters
+- **Good (60-79)**: Acceptable distribution, some clustering
+- **Fair (40-59)**: Moderate clustering, may be vulnerable to localized attacks
+- **Poor (<40)**: Severe clustering, high risk
+
+**When to use:**
+- **`--check-clustering`**: High-security applications where localized fault injection is a concern
+- **`--show-clustering`**: Always recommended to verify bit difference quality
+- **`--min-distribution-score`**: Set based on security requirements (40-70 typical)
 
 ### C Code Output Formats
 
@@ -380,7 +450,14 @@ See [BOUNDS_THEORY.md](BOUNDS_THEORY.md) for detailed mathematical explanations,
    - Validate against all invalid values, not just specific constants
    - Use with redundant checks in critical code paths
 
-4. **C Code Generation**:
+4. **Clustering Analysis**:
+   - Always use `--show-clustering` to verify bit difference distribution quality
+   - For high-security applications, enable `--check-clustering` during generation
+   - Target distribution scores: ≥80 for excellent, ≥60 for good security
+   - Adjust `--min-distribution-score` based on threat model (40-70 typical range)
+   - Pay attention to byte coverage - 100% coverage provides best protection against localized attacks
+
+5. **C Code Generation**:
    - Use `--format c-enum` for type-safe enumerations
    - Use `--format c-define` for preprocessor constants
    - Use `--prefix` to customize constant names (e.g., `--prefix STATE` for `STATE_00`, `STATE_01`)
