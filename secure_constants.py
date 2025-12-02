@@ -1074,6 +1074,281 @@ def validate_parameters(bit_width: int, num_constants: int,
     return True, None
 
 
+def parse_constants_from_file(file_path: str) -> Tuple[List[int], Optional[int]]:
+    """
+    Parse constants from an input file.
+
+    Supports multiple formats:
+    - Hexadecimal: 0xABCD, 0XABCD, ABCDh, $ABCD
+    - Decimal: 12345
+    - Binary: 0b1010, 0B1010, 1010b
+    - C-style: #define CONST 0x1234
+    - Comments: // or # or /* */
+
+    Args:
+        file_path: Path to input file
+
+    Returns:
+        Tuple of (constants_list, detected_bit_width)
+        bit_width is auto-detected from maximum value, or None if empty
+    """
+    import re
+
+    constants = []
+
+    with open(file_path, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            # Remove comments
+            line = re.sub(r'//.*$', '', line)  # C++ style
+            line = re.sub(r'#.*$', '', line)   # Python/shell style
+            line = re.sub(r'/\*.*?\*/', '', line)  # C style
+
+            # Find all number-like tokens
+            # Hex: 0x1234, 0X1234, 1234h, $1234
+            hex_matches = re.findall(r'\b0[xX]([0-9a-fA-F]+)\b|\b([0-9a-fA-F]+)[hH]\b|\$([0-9a-fA-F]+)\b', line)
+            for match in hex_matches:
+                hex_str = match[0] or match[1] or match[2]
+                try:
+                    constants.append(int(hex_str, 16))
+                except ValueError:
+                    pass
+
+            # Binary: 0b1010, 0B1010, 1010b
+            bin_matches = re.findall(r'\b0[bB]([01]+)\b|\b([01]+)[bB]\b', line)
+            for match in bin_matches:
+                bin_str = match[0] or match[1]
+                try:
+                    constants.append(int(bin_str, 2))
+                except ValueError:
+                    pass
+
+            # Decimal: plain numbers (but avoid matching hex digits)
+            # Only match if no hex prefix and not followed by h or within hex context
+            if not hex_matches and not bin_matches:
+                dec_matches = re.findall(r'\b(\d+)\b', line)
+                for dec_str in dec_matches:
+                    try:
+                        val = int(dec_str, 10)
+                        # Sanity check: reasonable range for constants
+                        if 0 <= val <= 0xFFFFFFFFFFFFFFFF:
+                            constants.append(val)
+                    except ValueError:
+                        pass
+
+    if not constants:
+        return [], None
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_constants = []
+    for c in constants:
+        if c not in seen:
+            seen.add(c)
+            unique_constants.append(c)
+
+    # Auto-detect bit width from maximum value
+    max_val = max(unique_constants)
+    if max_val == 0:
+        bit_width = 8
+    else:
+        bit_width = max_val.bit_length()
+        # Round up to nearest power of 2 or common size
+        if bit_width <= 8:
+            bit_width = 8
+        elif bit_width <= 16:
+            bit_width = 16
+        elif bit_width <= 32:
+            bit_width = 32
+        else:
+            bit_width = 64
+
+    return unique_constants, bit_width
+
+
+def verify_constants(constants: List[int], bit_width: int,
+                     show_clustering: bool = False,
+                     clustering_threshold: float = 60.0) -> dict:
+    """
+    Verify security properties of a set of constants.
+
+    Args:
+        constants: List of constants to verify
+        bit_width: Bit width of constants
+        show_clustering: Whether to analyze bit clustering
+        clustering_threshold: Score threshold for clustering analysis
+
+    Returns:
+        Dictionary with verification results:
+        - min_distance, max_distance, avg_distance
+        - weak_patterns: list of (index, value, reason)
+        - complement_pairs: list of (index_i, index_j)
+        - clustering_analysis: dict or None
+        - verdict: "PASS" or "FAIL"
+        - issues: list of issue descriptions
+    """
+    issues = []
+
+    # Calculate distances
+    if len(constants) < 2:
+        min_dist, max_dist, avg_dist = 0, 0, 0.0
+        if len(constants) == 1:
+            issues.append("Only one constant provided - cannot calculate distances")
+    else:
+        min_dist, max_dist, avg_dist = calculate_statistics(constants)
+
+    # Check for weak patterns
+    weak_patterns = check_set_for_weak_patterns(constants, bit_width)
+    if weak_patterns:
+        issues.append(f"{len(weak_patterns)} weak patterns detected")
+
+    # Check for complements
+    complement_pairs = check_for_complements(constants, bit_width)
+    if complement_pairs:
+        issues.append(f"{len(complement_pairs)} complement pairs detected (CRITICAL)")
+
+    # Check for duplicates
+    if len(constants) != len(set(constants)):
+        issues.append("Duplicate constants detected")
+
+    # Clustering analysis
+    clustering_analysis = None
+    if show_clustering and len(constants) >= 2:
+        # Analyze all pairs and collect statistics
+        pair_analyses = []
+        for i in range(len(constants)):
+            for j in range(i+1, len(constants)):
+                cluster_info = analyze_bit_clustering(constants[i], constants[j], bit_width)
+                score = calculate_distribution_score(cluster_info, bit_width)
+                pair_analyses.append((i, j, score, cluster_info))
+
+        pair_analyses.sort(key=lambda x: x[2])
+
+        poor_pairs = [p for p in pair_analyses if p[2] < clustering_threshold]
+        if poor_pairs:
+            issues.append(f"{len(poor_pairs)} pairs with poor bit distribution (score < {clustering_threshold})")
+
+        clustering_analysis = {
+            'pair_analyses': pair_analyses,
+            'poor_pairs': poor_pairs,
+            'threshold': clustering_threshold
+        }
+
+    # Overall verdict
+    verdict = "PASS" if not issues else "FAIL"
+
+    return {
+        'min_distance': min_dist if len(constants) >= 2 else None,
+        'max_distance': max_dist if len(constants) >= 2 else None,
+        'avg_distance': avg_dist if len(constants) >= 2 else None,
+        'weak_patterns': weak_patterns,
+        'complement_pairs': complement_pairs,
+        'clustering_analysis': clustering_analysis,
+        'verdict': verdict,
+        'issues': issues
+    }
+
+
+def print_verification_report(constants: List[int], bit_width: int,
+                              verification: dict, show_details: bool = False):
+    """
+    Print verification report for a set of constants.
+
+    Args:
+        constants: List of constants
+        bit_width: Bit width of constants
+        verification: Verification results from verify_constants()
+        show_details: Whether to show detailed analysis
+    """
+    print(f"\n{'='*70}")
+    print(f"CONSTANT VERIFICATION REPORT")
+    print(f"{'='*70}")
+    print(f"Number of constants: {len(constants)}")
+    print(f"Bit width: {bit_width}")
+    print(f"{'='*70}\n")
+
+    # Print constants
+    print("Constants:")
+    hex_width = (bit_width + 3) // 4
+    for i, const in enumerate(constants):
+        weight = bin(const).count('1')
+        print(f"  [{i:2d}]  0x{const:0{hex_width}X}  (weight: {weight}, dec: {const})")
+
+    # Distance statistics
+    if verification['min_distance'] is not None:
+        print(f"\n{'='*70}")
+        print("Hamming Distance Statistics:")
+        print(f"{'='*70}")
+        print(f"  Minimum distance: {verification['min_distance']}")
+        print(f"  Maximum distance: {verification['max_distance']}")
+        print(f"  Average distance: {verification['avg_distance']:.2f}")
+
+        # Show theoretical maximum
+        if len(constants) >= 2:
+            theoretical_max, bound_name = calculate_theoretical_max_distance(bit_width, len(constants))
+            efficiency = (verification['min_distance'] / theoretical_max * 100) if theoretical_max > 0 else 0
+            print(f"  Theoretical max:  {theoretical_max} ({bound_name} bound)")
+            print(f"  Efficiency:       {efficiency:.1f}% of theoretical maximum")
+        print(f"{'='*70}\n")
+
+    # Weak patterns
+    if verification['weak_patterns']:
+        print(f"{'='*70}")
+        print(f"⚠ WARNING: Weak Patterns Detected ({len(verification['weak_patterns'])} constants)")
+        print(f"{'='*70}")
+        for idx, value, reason in verification['weak_patterns']:
+            print(f"  [{idx:2d}]  0x{value:0{hex_width}X}  - {reason}")
+        print(f"{'='*70}\n")
+
+    # Complement pairs
+    if verification['complement_pairs']:
+        print(f"{'='*70}")
+        print(f"⚠ CRITICAL: Bitwise Complement Pairs ({len(verification['complement_pairs'])} pairs)")
+        print(f"{'='*70}")
+        print("A single stuck-at fault affecting all bits can transform one constant")
+        print("into another, compromising security!\n")
+        for i, j in verification['complement_pairs']:
+            print(f"  [{i:2d}]  0x{constants[i]:0{hex_width}X}  <-->  [{j:2d}]  0x{constants[j]:0{hex_width}X}")
+        print(f"{'='*70}\n")
+
+    # Distance matrix
+    if len(constants) >= 2 and len(constants) <= 20:
+        print("Hamming Distance Matrix:")
+        print("      ", end="")
+        for i in range(len(constants)):
+            print(f"[{i:2d}]", end=" ")
+        print()
+
+        matrix = calculate_distance_matrix(constants)
+        for i in range(len(constants)):
+            print(f"[{i:2d}]  ", end="")
+            for j in range(len(constants)):
+                if i == j:
+                    print("  - ", end=" ")
+                else:
+                    print(f"{matrix[i][j]:3d}", end=" ")
+            print()
+        print()
+
+    # Clustering analysis
+    if verification['clustering_analysis']:
+        print_clustering_analysis(constants, bit_width, show_details=show_details,
+                                  threshold=verification['clustering_analysis']['threshold'])
+
+    # Final verdict
+    print(f"{'='*70}")
+    if verification['verdict'] == "PASS":
+        print(f"✓ VERIFICATION PASSED")
+        print(f"{'='*70}")
+        print("No critical security issues detected.")
+    else:
+        print(f"✗ VERIFICATION FAILED")
+        print(f"{'='*70}")
+        print(f"Issues found ({len(verification['issues'])}):")
+        for issue in verification['issues']:
+            print(f"  - {issue}")
+    print(f"{'='*70}\n")
+
+
 def format_c_enum(constants: List[int], bit_width: int,
                  enum_name: str = "SecureConstants",
                  prefix: str = "SECURE_CONST") -> str:
@@ -1298,34 +1573,44 @@ def print_results(result: GenerationResult, bit_width: int,
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description='Generate secure constants with maximum Hamming distance',
+        description='Generate or verify secure constants with maximum Hamming distance',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  Auto-discover maximum distance for 10 32-bit constants:
-    %(prog)s --bits 32 --count 10
+  Generation mode:
+    Auto-discover maximum distance for 10 32-bit constants:
+      %(prog)s --bits 32 --count 10
 
-  Generate 10 32-bit constants with minimum distance 16:
-    %(prog)s --bits 32 --count 10 --min-distance 16
+    Generate 10 32-bit constants with minimum distance 16:
+      %(prog)s --bits 32 --count 10 --min-distance 16
 
-  Generate 5 16-bit constants with minimum distance 8:
-    %(prog)s -b 16 -c 5 -m 8
+    Generate 5 16-bit constants with minimum distance 8:
+      %(prog)s -b 16 -c 5 -m 8
 
-  Show theoretical bounds with auto-discovery:
-    %(prog)s -b 32 -c 10 --show-bounds
+    Output in C enum format:
+      %(prog)s -b 32 -c 10 --format c-enum
 
-  Output in C enum format:
-    %(prog)s -b 32 -c 10 --format c-enum
+  Verification mode:
+    Verify constants from file (auto-detect bit width):
+      %(prog)s --verify constants.txt
 
-  Output in C #define format:
-    %(prog)s -b 32 -c 10 -m 16 --format c-define
+    Verify with explicit bit width:
+      %(prog)s --verify constants.txt --bits 32
+
+    Verify with clustering analysis:
+      %(prog)s --verify constants.txt --show-clustering
         """
     )
 
-    parser.add_argument('-b', '--bits', type=int, required=True,
-                       help='Bit width of constants (8-64)')
-    parser.add_argument('-c', '--count', type=int, required=True,
-                       help='Number of constants to generate')
+    # Mode selection
+    parser.add_argument('--verify', type=str, metavar='FILE',
+                       help='Verification mode: analyze constants from FILE')
+
+    # Generation/verification parameters
+    parser.add_argument('-b', '--bits', type=int,
+                       help='Bit width of constants (8-64, auto-detected in verify mode)')
+    parser.add_argument('-c', '--count', type=int,
+                       help='Number of constants to generate (generation mode only)')
     parser.add_argument('-m', '--min-distance', type=int, default=None,
                        help='Minimum required Hamming distance (optional: auto-discovers maximum if not specified)')
     parser.add_argument('-a', '--attempts', type=int, default=100,
@@ -1351,7 +1636,54 @@ Examples:
 
     args = parser.parse_args()
 
-    # Validate parameters
+    # Verification mode
+    if args.verify:
+        try:
+            constants, detected_bit_width = parse_constants_from_file(args.verify)
+        except FileNotFoundError:
+            print(f"ERROR: File not found: {args.verify}", file=sys.stderr)
+            return 2
+        except Exception as e:
+            print(f"ERROR: Failed to parse file: {e}", file=sys.stderr)
+            return 2
+
+        if not constants:
+            print(f"ERROR: No constants found in file: {args.verify}", file=sys.stderr)
+            return 2
+
+        # Use explicit bit width if provided, otherwise use detected
+        bit_width = args.bits if args.bits else detected_bit_width
+
+        print(f"Loaded {len(constants)} constants from {args.verify}")
+        if args.bits:
+            print(f"Using bit width: {bit_width} (user-specified)")
+        else:
+            print(f"Detected bit width: {bit_width} (auto-detected from max value)")
+
+        # Verify constants
+        verification = verify_constants(
+            constants=constants,
+            bit_width=bit_width,
+            show_clustering=args.show_clustering,
+            clustering_threshold=args.min_distribution_score
+        )
+
+        # Print report
+        print_verification_report(
+            constants=constants,
+            bit_width=bit_width,
+            verification=verification,
+            show_details=args.show_clustering
+        )
+
+        return 0 if verification['verdict'] == "PASS" else 1
+
+    # Generation mode - validate parameters
+    if not args.bits or not args.count:
+        print("ERROR: Generation mode requires --bits and --count arguments", file=sys.stderr)
+        print("       Use --verify FILE for verification mode", file=sys.stderr)
+        return 2
+
     valid, error_msg = validate_parameters(args.bits, args.count, args.min_distance)
     if not valid:
         print(f"ERROR: {error_msg}", file=sys.stderr)
