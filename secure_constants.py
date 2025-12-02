@@ -389,6 +389,198 @@ def calculate_distribution_score(clustering_info: dict, bit_width: int) -> float
     return max(0.0, min(100.0, score))
 
 
+def calculate_bit_difference_histogram(constants: List[int], bit_width: int) -> dict:
+    """
+    Calculate histogram of bit differences across all constant pairs.
+
+    Analyzes spatial distribution of bit differences to identify hot/cold spots
+    that could be exploited by localized fault injection attacks.
+
+    Args:
+        constants: List of constants
+        bit_width: Bit width of constants
+
+    Returns:
+        Dictionary with:
+        - bit_position_counts: Array of difference counts per bit position
+        - byte_counts: Array of difference counts per byte
+        - hamming_distance_histogram: Count of pairs for each Hamming distance
+        - total_pairs: Total number of pairs analyzed
+    """
+    num_bytes = (bit_width + 7) // 8
+    bit_position_counts = [0] * bit_width
+    byte_counts = [0] * num_bytes
+    hamming_distance_histogram = {}
+    total_pairs = 0
+
+    for i in range(len(constants)):
+        for j in range(i + 1, len(constants)):
+            total_pairs += 1
+            xor = constants[i] ^ constants[j]
+            hamming_dist = bin(xor).count('1')
+
+            # Update Hamming distance histogram
+            hamming_distance_histogram[hamming_dist] = hamming_distance_histogram.get(hamming_dist, 0) + 1
+
+            # Count differences per bit position
+            for bit_pos in range(bit_width):
+                if (xor >> bit_pos) & 1:
+                    bit_position_counts[bit_pos] += 1
+
+            # Count differences per byte
+            for byte_idx in range(num_bytes):
+                byte_mask = 0xFF << (byte_idx * 8)
+                if xor & byte_mask:
+                    byte_counts[byte_idx] += 1
+
+    return {
+        'bit_position_counts': bit_position_counts,
+        'byte_counts': byte_counts,
+        'hamming_distance_histogram': hamming_distance_histogram,
+        'total_pairs': total_pairs
+    }
+
+
+def visualize_hamming_distance_histogram(histogram: dict, width: int = 50) -> str:
+    """
+    Create ASCII histogram of Hamming distances.
+
+    Args:
+        histogram: Hamming distance histogram from calculate_bit_difference_histogram
+        width: Width of histogram bars in characters
+
+    Returns:
+        Multi-line string with ASCII histogram
+    """
+    if not histogram:
+        return "No data to display"
+
+    lines = []
+    lines.append("Hamming Distance Distribution:")
+    lines.append("")
+
+    hamming_hist = histogram['hamming_distance_histogram']
+    total_pairs = histogram['total_pairs']
+
+    if not hamming_hist:
+        return "No pairs analyzed"
+
+    # Find max count for scaling
+    max_count = max(hamming_hist.values())
+
+    # Sort by distance
+    for distance in sorted(hamming_hist.keys()):
+        count = hamming_hist[distance]
+        percentage = (count / total_pairs * 100) if total_pairs > 0 else 0
+
+        # Calculate bar length
+        bar_length = int((count / max_count * width)) if max_count > 0 else 0
+
+        # Create bar
+        bar = "█" * bar_length
+
+        lines.append(f"  d={distance:2d} │{bar:<{width}} │ {count:3d} pairs ({percentage:5.1f}%)")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def visualize_bit_position_heatmap(histogram: dict, bit_width: int, width: int = 64) -> str:
+    """
+    Create ASCII heatmap showing which bit positions differ most frequently.
+
+    This helps identify vulnerable bit positions that differ frequently,
+    which could be targeted by position-specific fault injection attacks.
+
+    Args:
+        histogram: Bit difference histogram from calculate_bit_difference_histogram
+        bit_width: Bit width of constants
+        width: Maximum width for display
+
+    Returns:
+        Multi-line string with ASCII heatmap
+    """
+    lines = []
+    lines.append("Bit Position Difference Frequency (hot spots = frequently different):")
+    lines.append("")
+
+    bit_counts = histogram['bit_position_counts']
+    total_pairs = histogram['total_pairs']
+
+    if not bit_counts or total_pairs == 0:
+        return "No data to display"
+
+    max_count = max(bit_counts) if bit_counts else 1
+
+    # ASCII characters for different intensity levels
+    intensity_chars = [' ', '░', '▒', '▓', '█']
+
+    # Group by bytes for readability
+    num_bytes = (bit_width + 7) // 8
+
+    # Bit position labels (show every 8th bit)
+    lines.append("  Bit:  " + "".join(f"{i*8:^8}" for i in range(num_bytes)))
+
+    # Draw heatmap row
+    heatmap_line = "        "
+    for byte_idx in range(num_bytes):
+        for bit_in_byte in range(8):
+            bit_pos = byte_idx * 8 + bit_in_byte
+            if bit_pos < bit_width:
+                count = bit_counts[bit_pos]
+                # Map count to intensity (0-100%)
+                intensity = (count / max_count) if max_count > 0 else 0
+                char_idx = min(int(intensity * len(intensity_chars)), len(intensity_chars) - 1)
+                heatmap_line += intensity_chars[char_idx]
+            else:
+                heatmap_line += ' '
+        heatmap_line += ' '
+
+    lines.append(heatmap_line)
+
+    # Byte labels
+    lines.append("  Byte: " + "".join(f"{i:^8}" for i in range(num_bytes)))
+    lines.append("")
+
+    # Legend
+    lines.append(f"  Legend: {intensity_chars[0]}=0% {intensity_chars[1]}=25% {intensity_chars[2]}=50% {intensity_chars[3]}=75% {intensity_chars[4]}=100%")
+    lines.append("")
+
+    # Show statistics per byte
+    lines.append("  Byte-level difference counts:")
+    num_bytes = (bit_width + 7) // 8
+    for byte_idx in range(num_bytes):
+        byte_diff_sum = sum(bit_counts[byte_idx * 8 + i] for i in range(8) if byte_idx * 8 + i < bit_width)
+        avg_per_bit = byte_diff_sum / 8 if byte_diff_sum > 0 else 0
+        percentage = (byte_diff_sum / (total_pairs * 8) * 100) if total_pairs > 0 else 0
+
+        # Create mini bar
+        bar_width = 20
+        bar_length = int((byte_diff_sum / (max_count * 8) * bar_width)) if max_count > 0 else 0
+        bar = "▓" * bar_length + "░" * (bar_width - bar_length)
+
+        lines.append(f"    Byte {byte_idx}: │{bar}│ {byte_diff_sum:4d} diffs ({percentage:5.1f}%)")
+
+    lines.append("")
+
+    # Analysis
+    min_byte_sum = min(sum(bit_counts[byte_idx * 8 + i] for i in range(8) if byte_idx * 8 + i < bit_width)
+                       for byte_idx in range(num_bytes))
+    max_byte_sum = max(sum(bit_counts[byte_idx * 8 + i] for i in range(8) if byte_idx * 8 + i < bit_width)
+                       for byte_idx in range(num_bytes))
+
+    if max_byte_sum > 0:
+        imbalance = (max_byte_sum - min_byte_sum) / max_byte_sum * 100
+        if imbalance > 30:
+            lines.append(f"  ⚠ Warning: Byte imbalance detected ({imbalance:.1f}%)")
+            lines.append(f"    Differences are not evenly distributed across bytes.")
+        else:
+            lines.append(f"  ✓ Good: Differences are well-distributed across bytes ({imbalance:.1f}% imbalance)")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def visualize_bit_differences(value1: int, value2: int, bit_width: int,
                                label1: str = "A", label2: str = "B") -> str:
     """
@@ -1249,7 +1441,8 @@ def verify_constants(constants: List[int], bit_width: int,
 
 
 def print_verification_report(constants: List[int], bit_width: int,
-                              verification: dict, show_details: bool = False):
+                              verification: dict, show_details: bool = False,
+                              show_histogram: bool = False):
     """
     Print verification report for a set of constants.
 
@@ -1328,6 +1521,20 @@ def print_verification_report(constants: List[int], bit_width: int,
                     print(f"{matrix[i][j]:3d}", end=" ")
             print()
         print()
+
+    # Histogram visualization
+    if show_histogram and len(constants) >= 2:
+        print(f"{'='*70}")
+        print("Bit Difference Distribution Analysis:")
+        print(f"{'='*70}\n")
+
+        histogram = calculate_bit_difference_histogram(constants, bit_width)
+
+        # Hamming distance histogram
+        print(visualize_hamming_distance_histogram(histogram))
+
+        # Bit position heatmap
+        print(visualize_bit_position_heatmap(histogram, bit_width))
 
     # Clustering analysis
     if verification['clustering_analysis']:
@@ -1442,7 +1649,8 @@ def print_results(result: GenerationResult, bit_width: int,
                  num_constants: int, min_required_distance: Optional[int],
                  show_bounds: bool = False, auto_mode: bool = False,
                  output_format: str = "default", prefix: str = "SECURE_CONST",
-                 show_clustering: bool = False, clustering_threshold: float = 60.0):
+                 show_clustering: bool = False, clustering_threshold: float = 60.0,
+                 show_histogram: bool = False):
     """
     Print generation results in a formatted way.
 
@@ -1550,6 +1758,20 @@ def print_results(result: GenerationResult, bit_width: int,
         print()
     print()
 
+    # Add histogram visualization if requested
+    if show_histogram and len(result.constants) >= 2:
+        print(f"{'='*70}")
+        print("Bit Difference Distribution Analysis:")
+        print(f"{'='*70}\n")
+
+        histogram = calculate_bit_difference_histogram(result.constants, bit_width)
+
+        # Hamming distance histogram
+        print(visualize_hamming_distance_histogram(histogram))
+
+        # Bit position heatmap
+        print(visualize_bit_position_heatmap(histogram, bit_width))
+
     # Add clustering analysis if requested
     if show_clustering:
         print_clustering_analysis(result.constants, bit_width,
@@ -1597,6 +1819,9 @@ Examples:
     Verify with explicit bit width:
       %(prog)s --verify constants.txt --bits 32
 
+    Verify with histogram visualization:
+      %(prog)s --verify constants.txt --show-histogram
+
     Verify with clustering analysis:
       %(prog)s --verify constants.txt --show-clustering
         """
@@ -1633,6 +1858,8 @@ Examples:
                        help='Minimum distribution quality score when --check-clustering enabled (0-100, default: 40)')
     parser.add_argument('--show-clustering', action='store_true',
                        help='Show detailed bit difference clustering analysis in output')
+    parser.add_argument('--show-histogram', action='store_true',
+                       help='Show bit difference distribution histogram and heatmap')
 
     args = parser.parse_args()
 
@@ -1673,7 +1900,8 @@ Examples:
             constants=constants,
             bit_width=bit_width,
             verification=verification,
-            show_details=args.show_clustering
+            show_details=args.show_clustering,
+            show_histogram=args.show_histogram
         )
 
         return 0 if verification['verdict'] == "PASS" else 1
@@ -1708,7 +1936,8 @@ Examples:
             print()  # Blank line before results
             print_results(result, args.bits, args.count, achieved_distance, args.show_bounds, auto_mode=True,
                          output_format=args.output_format, prefix=args.prefix,
-                         show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score)
+                         show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score,
+                         show_histogram=args.show_histogram)
             return 0
         else:
             print(f"\nERROR: Failed to generate constants even with minimum distance requirements")
@@ -1732,7 +1961,8 @@ Examples:
         # Print results
         print_results(result, args.bits, args.count, args.min_distance, args.show_bounds, auto_mode=False,
                      output_format=args.output_format, prefix=args.prefix,
-                     show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score)
+                     show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score,
+                     show_histogram=args.show_histogram)
 
         # Return appropriate exit code
         return 0 if result.success else 1
