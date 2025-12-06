@@ -108,21 +108,21 @@ Instruction encodings:
 
 ### RISC-V RV32I
 
-| Constants | Typical Max Distance | Valid Set Utilization |
-|-----------|---------------------|----------------------|
-| 5         | 12-14              | < 0.001%            |
-| 10        | 9-11               | < 0.001%            |
-| 20        | 7-9                | < 0.002%            |
+| Constants | Typical Min Distance | Theoretical % | Valid Set Utilization |
+|-----------|---------------------|---------------|----------------------|
+| 5         | 12-13              | 60-65%        | < 0.001%            |
+| 10        | 10                 | ~59%          | < 0.001%            |
+| 20        | 8-9                | 50-56%        | < 0.002%            |
 
 ### ARM Thumb-2
 
-| Constants | Typical Max Distance | Valid Set Utilization |
-|-----------|---------------------|----------------------|
-| 5         | 15-17              | < 0.01%             |
-| 10        | 12-14              | < 0.02%             |
-| 20        | 9-11               | < 0.03%             |
+| Constants | Typical Min Distance | Theoretical % | Valid Set Utilization |
+|-----------|---------------------|---------------|----------------------|
+| 5         | 15-16              | 75-80%        | < 0.01%             |
+| 10        | 11-12              | 65-71%        | < 0.02%             |
+| 20        | 8                  | ~50%          | < 0.03%             |
 
-**Note:** ARM achieves slightly better Hamming distances despite smaller valid set, due to better distribution of modified immediate patterns across the 32-bit space.
+**Note:** ARM achieves better Hamming distances and efficiency percentages compared to RISC-V, despite having a much smaller valid set (69k vs 1M values). This is due to better distribution of modified immediate patterns across the 32-bit space.
 
 ## Trade-offs
 
@@ -134,16 +134,17 @@ Instruction encodings:
 
 ### Limitations
 - ⚠️ Lower maximum achievable Hamming distance (vs unconstrained generation)
-  - RISC-V: Typically 30-60% of theoretical maximum
-  - ARM: Typically 60-80% of theoretical maximum
-- ⚠️ Some weak pattern warnings are expected (e.g., ARM modified immediates produce repeating bytes)
-- ⚠️ Very small valid set (< 0.025% of 2³² space)
+  - RISC-V: Typically 50-65% of theoretical maximum
+  - ARM: Typically 50-80% of theoretical maximum (better than RISC-V)
+- ⚠️ Very small valid set (RISC-V: 0.024%, ARM: 0.0016% of 2³² space)
+- ⚠️ Performance degrades with more constants (distance drops from 12-16 for n=5 to 8 for n=20)
 
 ## Security Considerations
 
 Even with architecture constraints:
-- Minimum Hamming distance of 8-10+ is achievable for most use cases
-- This is sufficient for fault injection resistance in most embedded security scenarios
+- Minimum Hamming distance of 8+ is reliably achievable (10+ for small sets)
+- ARM consistently achieves higher distances than RISC-V (11-16 vs 10-13 for n≤10)
+- Distance of 8+ is sufficient for fault injection resistance in most embedded scenarios
 - The benefit of single-instruction loading (reduced attack surface, simpler code) often outweighs slightly lower Hamming distance
 
 ## Implementation Details
