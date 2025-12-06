@@ -74,6 +74,8 @@ python3 secure_constants.py --bits <BIT_WIDTH> --count <NUM_CONSTANTS> --min-dis
 - `-s, --seed`: Random seed for reproducibility
 - `--show-bounds`: Display theoretical bounds (Singleton, Hamming, Plotkin)
 - `--arch`: Architecture constraint - `riscv` (RV32I) or `arm` (Thumb-2) for single-instruction loadable constants
+- `--no-weak-check`: Disable weak pattern filtering (allows extreme Hamming weights, repeating bytes, etc.)
+- `--weight-threshold`: Hamming weight threshold (default: 0.25). Valid range: [threshold×bits, (1-threshold)×bits]
 - `--check-clustering`: Enable clustering optimization during generation
 - `--min-distribution-score`: Minimum distribution quality score when using `--check-clustering` (0-100, default: 40)
 - `--show-clustering`: Display detailed clustering analysis in output
@@ -295,6 +297,29 @@ enum SecureConstants {
 - ✅ No instruction cache pollution
 
 **See [ARCH_OPTIMIZATION.md](ARCH_OPTIMIZATION.md) for detailed technical specifications.**
+
+### Hamming Weight Filtering
+
+Control the balance of 1s and 0s in generated constants to avoid extreme weights:
+
+```bash
+# Default: 25% threshold (32-bit requires weight ∈ [8, 24])
+python3 secure_constants.py -b 32 -c 10
+
+# Stricter: 33% threshold (32-bit requires weight ∈ [11, 21])
+python3 secure_constants.py -b 32 -c 10 --weight-threshold 0.33
+
+# Disable weak pattern filtering entirely
+python3 secure_constants.py -b 32 -c 10 --no-weak-check
+```
+
+**Output includes weight statistics:**
+```
+Hamming weights: min=12, max=19, avg=15.4
+Weight threshold: 0.25 (valid range: [8, 24])
+```
+
+**Why it matters:** Extreme Hamming weights (too many or too few 1s) are vulnerable to certain fault attacks. Balanced weights maximize entropy and fault resistance.
 
 ### C Code Output Formats
 

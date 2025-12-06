@@ -108,7 +108,7 @@ def calculate_statistics(constants: List[int]) -> Tuple[int, int, float]:
 # Weak Pattern Detection
 # =============================================================================
 
-def is_weak_pattern(value: int, bit_width: int) -> Tuple[bool, Optional[str]]:
+def is_weak_pattern(value: int, bit_width: int, weight_threshold: float = 0.25) -> Tuple[bool, Optional[str]]:
     """
     Check if a constant has weak patterns that reduce security.
 
@@ -122,6 +122,8 @@ def is_weak_pattern(value: int, bit_width: int) -> Tuple[bool, Optional[str]]:
     Args:
         value: Constant to check
         bit_width: Bit width of constant
+        weight_threshold: Hamming weight threshold (0.0-0.5, default 0.25)
+                         Valid range: [threshold × bits, (1-threshold) × bits]
 
     Returns:
         Tuple of (is_weak, reason)
@@ -138,8 +140,8 @@ def is_weak_pattern(value: int, bit_width: int) -> Tuple[bool, Optional[str]]:
 
     # Check Hamming weight (should be reasonably balanced)
     weight = bin(value).count('1')
-    min_acceptable = bit_width // 4  # At least 25% ones
-    max_acceptable = bit_width - min_acceptable  # At most 75% ones
+    min_acceptable = max(1, int(bit_width * weight_threshold))
+    max_acceptable = bit_width - min_acceptable
 
     if weight < min_acceptable:
         return True, f"too few ones ({weight}/{bit_width})"
@@ -229,13 +231,15 @@ def check_for_complements(constants: List[int], bit_width: int) -> List[Tuple[in
     return complement_pairs
 
 
-def check_set_for_weak_patterns(constants: List[int], bit_width: int) -> List[Tuple[int, int, str]]:
+def check_set_for_weak_patterns(constants: List[int], bit_width: int,
+                                weight_threshold: float = 0.25) -> List[Tuple[int, int, str]]:
     """
     Check entire set for weak patterns.
 
     Args:
         constants: List of constants
         bit_width: Bit width of constants
+        weight_threshold: Hamming weight threshold (default: 0.25)
 
     Returns:
         List of (index, value, reason) for weak patterns found
@@ -243,7 +247,7 @@ def check_set_for_weak_patterns(constants: List[int], bit_width: int) -> List[Tu
     weak_patterns = []
 
     for i, const in enumerate(constants):
-        is_weak, reason = is_weak_pattern(const, bit_width)
+        is_weak, reason = is_weak_pattern(const, bit_width, weight_threshold)
         if is_weak:
             weak_patterns.append((i, const, reason))
 
@@ -1222,7 +1226,7 @@ def generate_random_constant(bit_width: int, rng: Union[secrets.SystemRandom, ra
 
 
 def generate_balanced_constant(bit_width: int, rng: Union[secrets.SystemRandom, random.Random],
-                               check_weak: bool = True) -> int:
+                               check_weak: bool = True, weight_threshold: float = 0.25) -> int:
     """
     Generate a constant with roughly balanced bit count (Hamming weight ≈ n/2).
     This is better for security as it avoids degenerate patterns.
@@ -1231,6 +1235,7 @@ def generate_balanced_constant(bit_width: int, rng: Union[secrets.SystemRandom, 
         bit_width: Number of bits
         rng: Random number generator
         check_weak: Whether to reject weak patterns
+        weight_threshold: Hamming weight threshold (default: 0.25)
 
     Returns:
         Balanced random constant without weak patterns
@@ -1248,7 +1253,7 @@ def generate_balanced_constant(bit_width: int, rng: Union[secrets.SystemRandom, 
 
         # Check for weak patterns if requested
         if check_weak:
-            is_weak, _ = is_weak_pattern(candidate, bit_width)
+            is_weak, _ = is_weak_pattern(candidate, bit_width, weight_threshold)
             if is_weak:
                 continue
 
@@ -1344,7 +1349,8 @@ def find_best_candidate(existing: List[int], bit_width: int,
                         check_clustering: bool = False,
                         min_distribution_score: float = 40.0,
                         arch_mode: Optional[str] = None,
-                        arch_valid_set: Optional[set] = None) -> Optional[int]:
+                        arch_valid_set: Optional[set] = None,
+                        weight_threshold: float = 0.25) -> Optional[int]:
     """
     Find the best candidate constant that maximizes minimum distance.
 
@@ -1366,6 +1372,7 @@ def find_best_candidate(existing: List[int], bit_width: int,
         min_distribution_score: Minimum distribution score (0-100) when check_clustering=True
         arch_mode: Architecture mode ('riscv', 'arm', or None)
         arch_valid_set: Pre-computed set of valid values for architecture
+        weight_threshold: Hamming weight threshold (default: 0.25)
 
     Returns:
         Best candidate or None if none meets requirements
@@ -1383,7 +1390,14 @@ def find_best_candidate(existing: List[int], bit_width: int,
             candidate = generate_arm_candidate(rng)
         else:
             # Standard generation (no architecture constraints)
-            candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak)
+            candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak,
+                                                  weight_threshold=weight_threshold)
+
+        # Check for weak patterns if requested (applies to all modes)
+        if check_weak:
+            is_weak, _ = is_weak_pattern(candidate, bit_width, weight_threshold)
+            if is_weak:
+                continue
 
         # Validate against architecture constraints if set provided
         if arch_valid_set is not None and candidate not in arch_valid_set:
@@ -1452,7 +1466,8 @@ def generate_constants(bit_width: int,
                       check_clustering: bool = False,
                       min_distribution_score: float = 40.0,
                       arch_mode: Optional[str] = None,
-                      arch_valid_set: Optional[set] = None) -> GenerationResult:
+                      arch_valid_set: Optional[set] = None,
+                      weight_threshold: float = 0.25) -> GenerationResult:
     """
     Generate a set of constants with specified minimum Hamming distance.
 
@@ -1473,6 +1488,7 @@ def generate_constants(bit_width: int,
         min_distribution_score: Minimum distribution score when check_clustering=True (default: 40.0)
         arch_mode: Architecture mode ('riscv', 'arm', or None for unconstrained)
         arch_valid_set: Pre-computed set of valid values (optional, for validation)
+        weight_threshold: Hamming weight threshold (default: 0.25)
 
     Returns:
         GenerationResult with constants and statistics
@@ -1489,13 +1505,30 @@ def generate_constants(bit_width: int,
     for attempt in range(max_attempts):
         constants = []
 
-        # Generate first constant
-        if arch_mode == 'riscv':
-            constants.append(generate_riscv_candidate(rng))
-        elif arch_mode == 'arm':
-            constants.append(generate_arm_candidate(rng))
-        else:
-            constants.append(generate_balanced_constant(bit_width, rng, check_weak=check_weak))
+        # Generate first constant (with weak pattern checking)
+        first_candidate_attempts = 0
+        while first_candidate_attempts < 1000:
+            if arch_mode == 'riscv':
+                first_const = generate_riscv_candidate(rng)
+            elif arch_mode == 'arm':
+                first_const = generate_arm_candidate(rng)
+            else:
+                first_const = generate_balanced_constant(bit_width, rng, check_weak=check_weak,
+                                                         weight_threshold=weight_threshold)
+
+            # Check for weak patterns if requested
+            if check_weak:
+                is_weak, _ = is_weak_pattern(first_const, bit_width, weight_threshold)
+                if is_weak:
+                    first_candidate_attempts += 1
+                    continue
+
+            constants.append(first_const)
+            break
+
+        # If we couldn't find a valid first constant, skip this attempt
+        if not constants:
+            continue
 
         # Greedily add remaining constants
         success = True
@@ -1506,7 +1539,8 @@ def generate_constants(bit_width: int,
                 check_clustering=check_clustering,
                 min_distribution_score=min_distribution_score,
                 arch_mode=arch_mode,
-                arch_valid_set=arch_valid_set
+                arch_valid_set=arch_valid_set,
+                weight_threshold=weight_threshold
             )
 
             if candidate is None:
@@ -1560,7 +1594,8 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
                               check_clustering: bool = False,
                               min_distribution_score: float = 40.0,
                               arch_mode: Optional[str] = None,
-                              arch_valid_set: Optional[set] = None) -> Tuple[int, GenerationResult]:
+                              arch_valid_set: Optional[set] = None,
+                              weight_threshold: float = 0.25) -> Tuple[int, GenerationResult]:
     """
     Auto-discover the maximum achievable minimum distance.
 
@@ -1577,6 +1612,7 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
         min_distribution_score: Minimum distribution score when check_clustering=True
         arch_mode: Architecture mode ('riscv', 'arm', or None)
         arch_valid_set: Pre-computed set of valid values
+        weight_threshold: Hamming weight threshold (default: 0.25)
 
     Returns:
         Tuple of (achieved_distance, generation_result)
@@ -1608,7 +1644,8 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
             check_clustering=check_clustering,
             min_distribution_score=min_distribution_score,
             arch_mode=arch_mode,
-            arch_valid_set=arch_valid_set
+            arch_valid_set=arch_valid_set,
+            weight_threshold=weight_threshold
         )
 
         if result.success:
@@ -1763,7 +1800,8 @@ def parse_constants_from_file(file_path: str) -> Tuple[List[int], Optional[int]]
 
 def verify_constants(constants: List[int], bit_width: int,
                      show_clustering: bool = False,
-                     clustering_threshold: float = 60.0) -> dict:
+                     clustering_threshold: float = 60.0,
+                     weight_threshold: float = 0.25) -> dict:
     """
     Verify security properties of a set of constants.
 
@@ -1772,6 +1810,7 @@ def verify_constants(constants: List[int], bit_width: int,
         bit_width: Bit width of constants
         show_clustering: Whether to analyze bit clustering
         clustering_threshold: Score threshold for clustering analysis
+        weight_threshold: Hamming weight threshold (default: 0.25)
 
     Returns:
         Dictionary with verification results:
@@ -1793,7 +1832,7 @@ def verify_constants(constants: List[int], bit_width: int,
         min_dist, max_dist, avg_dist = calculate_statistics(constants)
 
     # Check for weak patterns
-    weak_patterns = check_set_for_weak_patterns(constants, bit_width)
+    weak_patterns = check_set_for_weak_patterns(constants, bit_width, weight_threshold)
     if weak_patterns:
         issues.append(f"{len(weak_patterns)} weak patterns detected")
 
@@ -2056,7 +2095,8 @@ def print_results(result: GenerationResult, bit_width: int,
                  show_clustering: bool = False, clustering_threshold: float = 60.0,
                  show_histogram: bool = False,
                  arch_mode: Optional[str] = None,
-                 arch_valid_set: Optional[set] = None):
+                 arch_valid_set: Optional[set] = None,
+                 weight_threshold: float = 0.25):
     """
     Print generation results in a formatted way.
 
@@ -2119,6 +2159,17 @@ def print_results(result: GenerationResult, bit_width: int,
     print(f"  Minimum distance: {result.min_distance}")
     print(f"  Maximum distance: {result.max_distance}")
     print(f"  Average distance: {result.avg_distance:.2f}")
+
+    # Hamming weight statistics
+    weights = [bin(const).count('1') for const in result.constants]
+    min_weight = min(weights)
+    max_weight = max(weights)
+    avg_weight = sum(weights) / len(weights)
+    min_acceptable = max(1, int(bit_width * weight_threshold))
+    max_acceptable = bit_width - min_acceptable
+
+    print(f"\n  Hamming weights: min={min_weight}, max={max_weight}, avg={avg_weight:.1f}")
+    print(f"  Weight threshold: {weight_threshold} (valid range: [{min_acceptable}, {max_acceptable}])")
     print(f"{'='*70}\n")
 
     # Print architecture-specific instruction encodings
@@ -2143,7 +2194,7 @@ def print_results(result: GenerationResult, bit_width: int,
         print(f"{'='*70}\n")
 
     # Check for weak patterns
-    weak_patterns = check_set_for_weak_patterns(result.constants, bit_width)
+    weak_patterns = check_set_for_weak_patterns(result.constants, bit_width, weight_threshold)
     if weak_patterns:
         print(f"{'='*70}")
         print(f"WARNING: Weak patterns detected ({len(weak_patterns)} constants)")
@@ -2298,6 +2349,10 @@ Examples:
                        help='Show bit difference distribution histogram and heatmap')
     parser.add_argument('--arch', type=str, choices=['riscv', 'arm'],
                        help='Architecture constraint: generate only single-instruction loadable constants (riscv=RV32I, arm=Thumb-2)')
+    parser.add_argument('--no-weak-check', action='store_true',
+                       help='Disable weak pattern filtering (allows extreme Hamming weights, repeating bytes, etc.)')
+    parser.add_argument('--weight-threshold', type=float, default=0.25,
+                       help='Hamming weight threshold (default: 0.25). Valid range: [threshold×bits, (1-threshold)×bits]')
 
     args = parser.parse_args()
 
@@ -2344,7 +2399,8 @@ Examples:
             constants=constants,
             bit_width=bit_width,
             show_clustering=args.show_clustering,
-            clustering_threshold=args.min_distribution_score
+            clustering_threshold=args.min_distribution_score,
+            weight_threshold=args.weight_threshold
         )
 
         # Print report
@@ -2380,10 +2436,12 @@ Examples:
             max_attempts=args.attempts,
             candidates_per_round=args.candidates,
             seed=args.seed,
+            check_weak=not args.no_weak_check,
             check_clustering=args.check_clustering,
             min_distribution_score=args.min_distribution_score,
             arch_mode=arch_mode,
-            arch_valid_set=arch_valid_set
+            arch_valid_set=arch_valid_set,
+            weight_threshold=args.weight_threshold
         )
 
         if result.success:
@@ -2392,7 +2450,8 @@ Examples:
                          output_format=args.output_format, prefix=args.prefix,
                          show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score,
                          show_histogram=args.show_histogram,
-                         arch_mode=arch_mode, arch_valid_set=arch_valid_set)
+                         arch_mode=arch_mode, arch_valid_set=arch_valid_set,
+                         weight_threshold=args.weight_threshold)
             return 0
         else:
             print(f"\nERROR: Failed to generate constants even with minimum distance requirements")
@@ -2409,10 +2468,12 @@ Examples:
             max_attempts=args.attempts,
             candidates_per_round=args.candidates,
             seed=args.seed,
+            check_weak=not args.no_weak_check,
             check_clustering=args.check_clustering,
             min_distribution_score=args.min_distribution_score,
             arch_mode=arch_mode,
-            arch_valid_set=arch_valid_set
+            arch_valid_set=arch_valid_set,
+            weight_threshold=args.weight_threshold
         )
 
         # Print results
@@ -2420,7 +2481,8 @@ Examples:
                      output_format=args.output_format, prefix=args.prefix,
                      show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score,
                      show_histogram=args.show_histogram,
-                     arch_mode=arch_mode, arch_valid_set=arch_valid_set)
+                     arch_mode=arch_mode, arch_valid_set=arch_valid_set,
+                     weight_threshold=args.weight_threshold)
 
         # Return appropriate exit code
         return 0 if result.success else 1

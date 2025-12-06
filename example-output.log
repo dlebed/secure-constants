@@ -1,0 +1,109 @@
+Architecture mode: RISCV
+Pre-computing valid instruction set... done (1,052,671 valid values)
+
+Generating 10 32-bit constants (auto-discovering maximum distance)...
+(Testing up to 100 attempts with 1000 candidates per round)
+
+Auto-discovery mode with RISCV constraints:
+Valid set size: 1052671 values
+Unconstrained theoretical maximum is d ≤ 17 (Plotkin bound)
+Searching for maximum achievable distance with architecture constraints...
+
+Trying d = 17... ✗ Failed (best: d = 31)
+Trying d = 16... ✗ Failed (best: d = 31)
+Trying d = 15... ✗ Failed (best: d = 18)
+Trying d = 14... ✗ Failed (best: d = 19)
+Trying d = 13... ✗ Failed (best: d = 18)
+Trying d = 12... ✗ Failed (best: d = 18)
+Trying d = 11... ✗ Failed (best: d = 19)
+Trying d = 10... ✓ SUCCESS (achieved d = 10)
+
+
+======================================================================
+Generated 10 constants (32-bit)
+Minimum Hamming distance: 10 (auto-discovered, 59% of theoretical max)
+======================================================================
+
+Constants:
+  [ 0]  0xF84BB000  (weight: 12)
+  [ 1]  0x0000076F  (weight: 9)
+  [ 2]  0xFFFFFEFE  (weight: 30)
+  [ 3]  0x07B70000  (weight: 9)
+  [ 4]  0x4658D000  (weight: 9)
+  [ 5]  0x9580E000  (weight: 8)
+  [ 6]  0x598C1000  (weight: 8)
+  [ 7]  0x9A666000  (weight: 10)
+  [ 8]  0x00000190  (weight: 3)
+  [ 9]  0xE0D54000  (weight: 9)
+
+======================================================================
+Statistics:
+  Minimum distance: 10
+  Maximum distance: 29
+  Average distance: 14.64
+
+  Hamming weights: min=3, max=30, avg=10.7
+  Weight threshold: 0.25 (valid range: [8, 24])
+======================================================================
+
+======================================================================
+Architecture: RISCV - Single-Instruction Loadable
+======================================================================
+Valid set size: 1,052,671 values (0.0245% of 2^32)
+
+Instruction encodings:
+  [ 0]  0xF84BB000  →  lui rd, 0xF84BB
+  [ 1]  0x0000076F  →  addi rd, zero, 1903
+  [ 2]  0xFFFFFEFE  →  addi rd, zero, -258
+  [ 3]  0x07B70000  →  lui rd, 0x07B70
+  [ 4]  0x4658D000  →  lui rd, 0x4658D
+  [ 5]  0x9580E000  →  lui rd, 0x9580E
+  [ 6]  0x598C1000  →  lui rd, 0x598C1
+  [ 7]  0x9A666000  →  lui rd, 0x9A666
+  [ 8]  0x00000190  →  addi rd, zero, 400
+  [ 9]  0xE0D54000  →  lui rd, 0xE0D54
+
+✓ All 10 constants loadable in single RISCV instruction
+======================================================================
+
+======================================================================
+WARNING: Weak patterns detected (2 constants)
+======================================================================
+  [ 2]  0xFFFFFEFE  - too many ones (30/32)
+  [ 8]  0x00000190  - too few ones (3/32)
+======================================================================
+
+Hamming Distance Matrix:
+      [ 0] [ 1] [ 2] [ 3] [ 4] [ 5] [ 6] [ 7] [ 8] [ 9] 
+[ 0]    -   21  18  17  11  12  10  10  15  11 
+[ 1]   21   -   25  18  18  17  17  19  10  18 
+[ 2]   18  25   -   21  21  22  22  20  29  21 
+[ 3]   17  18  21   -   12  11  11  11  12  10 
+[ 4]   11  18  21  12   -   11  11  13  12  10 
+[ 5]   12  17  22  11  11   -   10  10  11  11 
+[ 6]   10  17  22  11  11  10   -   12  11  11 
+[ 7]   10  19  20  11  13  10  12   -   13  11 
+[ 8]   15  10  29  12  12  11  11  13   -   12 
+[ 9]   11  18  21  10  10  11  11  11  12   -  
+
+======================================================================
+C Enumeration Format:
+======================================================================
+
+/* Auto-generated secure constants (32-bit, 10 values) */
+/* Minimum Hamming distance: 10 */
+/* Type: uint32_t */
+
+enum SecureConstants {
+    SECURE_CONST_00 = 0xF84BB000UL,  /* weight: 12 */
+    SECURE_CONST_01 = 0x0000076FUL,  /* weight: 9 */
+    SECURE_CONST_02 = 0xFFFFFEFEUL,  /* weight: 30 */
+    SECURE_CONST_03 = 0x07B70000UL,  /* weight: 9 */
+    SECURE_CONST_04 = 0x4658D000UL,  /* weight: 9 */
+    SECURE_CONST_05 = 0x9580E000UL,  /* weight: 8 */
+    SECURE_CONST_06 = 0x598C1000UL,  /* weight: 8 */
+    SECURE_CONST_07 = 0x9A666000UL,  /* weight: 10 */
+    SECURE_CONST_08 = 0x00000190UL,  /* weight: 3 */
+    SECURE_CONST_09 = 0xE0D54000UL,  /* weight: 9 */
+};
+
