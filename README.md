@@ -6,6 +6,7 @@ Designed for embedded systems security use cases to provide resistance against h
 ## Features
 
 - **Auto-Discovery Mode**: Automatically finds maximum achievable distance
+- **Architecture Optimization**: Generate constants loadable with single instruction on RISC-V RV32I or ARM Thumb-2
 - **Clustering Analysis & Optimization**: Detects and prevents clustered bit differences for enhanced fault injection resistance
 - **C Code Output**: Generate ready-to-use C enums or #defines with customizable prefixes
 - **Weak Pattern Detection**: Automatically avoids cryptographically weak patterns (all zeros/ones, alternating bits, repeating bytes, extreme Hamming weights)
@@ -33,6 +34,7 @@ This tool is designed for embedded systems security scenarios:
 - **secure_constants.py** - Main constant generator with theoretical bounds validation
 - **bounds_calculator.py** - Standalone bounds calculator tool
 - **BOUNDS_THEORY.md** - Detailed explanation of coding theory bounds
+- **ARCH_OPTIMIZATION.md** - Architecture-specific optimization guide (RISC-V, ARM)
 - **README.md** - This file
 - **examples/** - Example outputs
 
@@ -71,6 +73,7 @@ python3 secure_constants.py --bits <BIT_WIDTH> --count <NUM_CONSTANTS> --min-dis
 - `--candidates`: Candidates to test per round (default: 1000)
 - `-s, --seed`: Random seed for reproducibility
 - `--show-bounds`: Display theoretical bounds (Singleton, Hamming, Plotkin)
+- `--arch`: Architecture constraint - `riscv` (RV32I) or `arm` (Thumb-2) for single-instruction loadable constants
 - `--check-clustering`: Enable clustering optimization during generation
 - `--min-distribution-score`: Minimum distribution quality score when using `--check-clustering` (0-100, default: 40)
 - `--show-clustering`: Display detailed clustering analysis in output
@@ -214,6 +217,84 @@ python3 secure_constants.py -b 32 -c 10 --check-clustering --show-clustering
 - **`--check-clustering`**: High-security applications where localized fault injection is a concern
 - **`--show-clustering`**: Always recommended to verify bit difference quality
 - **`--min-distribution-score`**: Set based on security requirements (40-70 typical)
+
+### Architecture-Optimized Constants (Single-Instruction Loading)
+
+Generate constants that can be loaded with a **single 32-bit instruction** on embedded processors, combining code efficiency with security.
+
+#### RISC-V RV32I
+
+```bash
+python3 secure_constants.py -b 32 -c 10 --arch riscv
+```
+
+Generates constants loadable with single `ADDI` or `LUI` instructions:
+- **Valid set**: ~1,052,671 values (0.024% of 2³²)
+- **ADDI range**: `[-2048, 2047]` → `addi rd, zero, imm`
+- **LUI range**: Multiples of 4096 → `lui rd, imm20`
+- **Typical Hamming distance**: 9-13 for 10 constants
+
+Output includes instruction encodings:
+```
+Architecture: RISCV - Single-Instruction Loadable
+Valid set size: 1,052,671 values (0.0245% of 2^32)
+
+Instruction encodings:
+  [ 0]  0x1118A000  →  lui rd, 0x1118A
+  [ 1]  0xFFFFFFFD  →  addi rd, zero, -3
+  [ 2]  0xAEF35000  →  lui rd, 0xAEF35
+  ...
+```
+
+#### ARM Thumb-2
+
+```bash
+python3 secure_constants.py -b 32 -c 10 --arch arm
+```
+
+Generates constants loadable with single `MOVW`, `MOV`, or `MVN` instructions:
+- **Valid set**: ~68,774 values (0.0016% of 2³²)
+- **MOVW**: 16-bit immediate zero-extended → `movw r0, #imm16`
+- **MOV**: Modified immediate patterns → `mov r0, #imm`
+- **MVN**: Bitwise NOT of modified immediate → `mvn r0, #imm`
+- **Typical Hamming distance**: 12-16 for 10 constants
+
+Output includes instruction encodings:
+```
+Architecture: ARM - Single-Instruction Loadable
+Valid set size: 68,774 values (0.0016% of 2^32)
+
+Instruction encodings:
+  [ 0]  0x0000D5AE  →  movw r0, #0xD5AE
+  [ 1]  0xFFFFFF40  →  mvn r0, #0x000000BF
+  [ 2]  0x00FF0000  →  mov r0, #0x00FF0000
+  ...
+```
+
+#### With C Output Format
+
+Combine architecture optimization with C code generation:
+
+```bash
+python3 secure_constants.py -b 32 -c 10 --arch riscv --format c-enum --prefix STATE
+```
+
+Generates ready-to-use C code with instruction comments:
+```c
+enum SecureConstants {
+    STATE_00 = 0x1118A000UL,  /* weight: 6, lui rd, 0x1118A */
+    STATE_01 = 0xFFFFFFFDUL,  /* weight: 31, addi rd, zero, -3 */
+    ...
+};
+```
+
+**Benefits:**
+- ✅ Reduced code size (no multi-instruction sequences)
+- ✅ Faster execution (fewer CPU cycles)
+- ✅ Maintains high Hamming distance for security (typically 9-16 bits)
+- ✅ No instruction cache pollution
+
+**See [ARCH_OPTIMIZATION.md](ARCH_OPTIMIZATION.md) for detailed technical specifications.**
 
 ### C Code Output Formats
 

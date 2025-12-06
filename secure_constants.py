@@ -924,6 +924,285 @@ def print_theoretical_bounds(n: int, M: int):
 
 
 # =============================================================================
+# Architecture-Specific Instruction Constraints
+# =============================================================================
+
+def is_riscv_single_instruction(value: int) -> bool:
+    """
+    Check if 32-bit value can be loaded with single RISC-V RV32I instruction.
+
+    Single-instruction loadable values:
+    - ADDI: signed 12-bit immediate range [-2048, 2047]
+      As 32-bit unsigned: 0x00000000-0x000007FF, 0xFFFFF800-0xFFFFFFFF
+    - LUI: upper 20 bits loaded, lower 12 bits zero (multiples of 4096)
+      Values: 0x00000000, 0x00001000, 0x00002000, ..., 0xFFFFF000
+
+    Args:
+        value: 32-bit value to check (treated as unsigned)
+
+    Returns:
+        True if loadable with single RV32I instruction
+    """
+    # Ensure 32-bit unsigned representation
+    value = value & 0xFFFFFFFF
+
+    # ADDI range: 0 to 2047 (positive immediates)
+    if value <= 0x7FF:
+        return True
+
+    # ADDI range: -2048 to -1 in two's complement (0xFFFFF800 to 0xFFFFFFFF)
+    if value >= 0xFFFFF800:
+        return True
+
+    # LUI loadable: multiple of 4096 (lower 12 bits all zero)
+    if (value & 0xFFF) == 0:
+        return True
+
+    return False
+
+
+def expand_arm_modified_immediate(imm12: int) -> int:
+    """
+    Expand ARM Thumb-2 modified immediate encoding to 32-bit value.
+
+    ARM Thumb-2 modified immediate encoding (12 bits):
+    Format: i:imm3:a:bcdefgh
+
+    Encoding rules:
+    - If imm3:a = 0b0000: 0x00000000XY (where XY = 0bcdefgh)
+    - If imm3:a = 0b0001: 0x00XY00XY
+    - If imm3:a = 0b0010: 0xXY00XY00
+    - If imm3:a = 0b0011: 0xXYXYXYXY
+    - If imm3:a = 0b0100-0b1111: Rotate right (1bcdefgh << 24) by 2*imm3a bits
+
+    Args:
+        imm12: 12-bit modified immediate encoding
+
+    Returns:
+        Expanded 32-bit value
+
+    Reference: ARM Architecture Reference Manual ARMv7-A/R
+               Section A5.3.2 Modified immediate constants in Thumb instructions
+    """
+    # Extract fields from 12-bit encoding
+    i = (imm12 >> 11) & 1
+    imm3 = (imm12 >> 8) & 0x7
+    a = (imm12 >> 7) & 1
+    bcdefgh = imm12 & 0x7F
+
+    # Combine imm3:a to get 4-bit mode selector
+    imm3a = (imm3 << 1) | a
+
+    # Mode 0: 0x00000000XY
+    if imm3a == 0b0000:
+        return bcdefgh
+
+    # Mode 1: 0x00XY00XY
+    elif imm3a == 0b0001:
+        return (bcdefgh << 16) | bcdefgh
+
+    # Mode 2: 0xXY00XY00
+    elif imm3a == 0b0010:
+        return (bcdefgh << 24) | (bcdefgh << 8)
+
+    # Mode 3: 0xXYXYXYXY
+    elif imm3a == 0b0011:
+        return (bcdefgh << 24) | (bcdefgh << 16) | (bcdefgh << 8) | bcdefgh
+
+    # Modes 4-15: Rotation encoding
+    else:
+        # Construct 8-bit value: 1bcdefgh (ensure bit 7 is set)
+        imm8 = 0x80 | bcdefgh
+
+        # Rotation amount: 2 * imm3a bits
+        rotation = 2 * imm3a
+
+        # Rotate right: shift value to be placed in bits [31:24] then rotate
+        # The ARM encoding rotates the value 1bcdefgh initially placed at bits 31:24
+        value = imm8 << 24
+        rotated = ((value >> rotation) | (value << (32 - rotation))) & 0xFFFFFFFF
+
+        return rotated
+
+
+def is_arm_modified_immediate(value: int) -> bool:
+    """
+    Check if value can be encoded as ARM Thumb-2 modified immediate.
+
+    Brute force approach: test all 4096 possible encodings.
+    This is fast enough for our use case (4096 iterations).
+
+    Args:
+        value: 32-bit value to check
+
+    Returns:
+        True if value matches any modified immediate encoding
+    """
+    value = value & 0xFFFFFFFF
+
+    for imm12 in range(4096):
+        if expand_arm_modified_immediate(imm12) == value:
+            return True
+
+    return False
+
+
+def is_arm_single_instruction(value: int) -> bool:
+    """
+    Check if 32-bit value can be loaded with single ARM Thumb-2 32-bit instruction.
+
+    Single-instruction loadable values:
+    - MOVW (T3 encoding): Any 16-bit immediate zero-extended (0x00000000-0x0000FFFF)
+    - MOV (T2 encoding): Modified immediate patterns (rotated 8-bit values)
+    - MVN: Bitwise NOT of modified immediate patterns
+
+    Args:
+        value: 32-bit value to check (treated as unsigned)
+
+    Returns:
+        True if loadable with single ARM Thumb-2 32-bit instruction
+    """
+    value = value & 0xFFFFFFFF
+
+    # MOVW can load any 16-bit value (zero-extended to 32 bits)
+    if value <= 0xFFFF:
+        return True
+
+    # MOV with modified immediate encoding
+    if is_arm_modified_immediate(value):
+        return True
+
+    # MVN (move NOT) with modified immediate
+    # MVN loads the bitwise complement of the modified immediate
+    inverted = (~value) & 0xFFFFFFFF
+    if is_arm_modified_immediate(inverted):
+        return True
+
+    return False
+
+
+def precompute_riscv_valid_set() -> set:
+    """
+    Pre-compute all RISC-V RV32I single-instruction loadable 32-bit values.
+
+    This includes:
+    - ADDI range: 4,096 values ([-2048, 2047] as signed)
+    - LUI range: 1,048,576 values (multiples of 4096)
+    Total: ~1,052,672 unique values (0.024% of 2^32 space)
+
+    Returns:
+        Set of all valid 32-bit values
+    """
+    valid = set()
+
+    # ADDI range: [-2048, 2047]
+    for val in range(-2048, 2048):
+        if val < 0:
+            # Convert negative to 32-bit unsigned (two's complement)
+            valid.add((1 << 32) + val)
+        else:
+            valid.add(val)
+
+    # LUI range: multiples of 4096 (lower 12 bits zero)
+    # upper_20 can be 0 to (2^20 - 1)
+    for upper_20 in range(1 << 20):
+        valid.add(upper_20 << 12)
+
+    return valid
+
+
+def precompute_arm_valid_set() -> set:
+    """
+    Pre-compute all ARM Thumb-2 single-instruction loadable 32-bit values.
+
+    This includes:
+    - MOVW range: 65,536 values (0x0000-0xFFFF)
+    - MOV modified immediate: ~1,024 unique patterns
+    - MVN modified immediate: ~1,024 unique patterns (bitwise NOT)
+    Total: ~67,000-69,000 unique values (0.0016% of 2^32 space)
+
+    Returns:
+        Set of all valid 32-bit values
+    """
+    valid = set()
+
+    # MOVW range: any 16-bit value zero-extended
+    for val in range(0x10000):
+        valid.add(val)
+
+    # MOV with modified immediate: all 4096 possible encodings
+    for imm12 in range(4096):
+        valid.add(expand_arm_modified_immediate(imm12))
+
+    # MVN with modified immediate: bitwise NOT of all encodings
+    for imm12 in range(4096):
+        value = expand_arm_modified_immediate(imm12)
+        inverted = (~value) & 0xFFFFFFFF
+        valid.add(inverted)
+
+    return valid
+
+
+def describe_riscv_instruction(value: int) -> str:
+    """
+    Return RISC-V RV32I assembly instruction for loading this value.
+
+    Args:
+        value: 32-bit value
+
+    Returns:
+        Assembly instruction string or error message
+    """
+    value = value & 0xFFFFFFFF
+
+    # ADDI positive range
+    if value <= 0x7FF:
+        return f"addi rd, zero, {value}"
+
+    # ADDI negative range (two's complement)
+    elif value >= 0xFFFFF800:
+        signed = value - (1 << 32)  # Convert to signed
+        return f"addi rd, zero, {signed}"
+
+    # LUI (multiple of 4096)
+    elif (value & 0xFFF) == 0:
+        upper_20 = value >> 12
+        return f"lui rd, 0x{upper_20:05X}"
+
+    else:
+        return "ERROR: Not single-instruction loadable"
+
+
+def describe_arm_instruction(value: int) -> str:
+    """
+    Return ARM Thumb-2 assembly instruction for loading this value.
+
+    Args:
+        value: 32-bit value
+
+    Returns:
+        Assembly instruction string or error message
+    """
+    value = value & 0xFFFFFFFF
+
+    # MOVW (16-bit immediate)
+    if value <= 0xFFFF:
+        return f"movw r0, #0x{value:04X}"
+
+    # MOV with modified immediate
+    elif is_arm_modified_immediate(value):
+        return f"mov r0, #0x{value:08X}"
+
+    # MVN with modified immediate
+    else:
+        inverted = (~value) & 0xFFFFFFFF
+        if is_arm_modified_immediate(inverted):
+            return f"mvn r0, #0x{inverted:08X}"
+
+    return "ERROR: Not single-instruction loadable"
+
+
+# =============================================================================
 # Random Number Generation
 # =============================================================================
 
@@ -979,18 +1258,102 @@ def generate_balanced_constant(bit_width: int, rng: Union[secrets.SystemRandom, 
     return generate_random_constant(bit_width, rng)
 
 
+def generate_riscv_candidate(rng: Union[secrets.SystemRandom, random.Random]) -> int:
+    """
+    Generate random 32-bit value from RISC-V RV32I single-instruction loadable set.
+
+    Generates from:
+    - ADDI range: 4,096 values (30% probability)
+    - LUI range: 1,048,576 values (70% probability - larger set)
+
+    Args:
+        rng: Random number generator
+
+    Returns:
+        Random 32-bit value loadable with single RV32I instruction
+    """
+    # Weight by set size: LUI range is much larger
+    if rng.random() < 0.7:
+        # LUI: multiple of 4096 (upper 20 bits, lower 12 zero)
+        upper_20 = rng.randint(0, (1 << 20) - 1)
+        return upper_20 << 12
+    else:
+        # ADDI: signed 12-bit immediate [-2048, 2047]
+        signed_val = rng.randint(-2048, 2047)
+        if signed_val < 0:
+            # Convert negative to 32-bit unsigned (two's complement)
+            return (1 << 32) + signed_val
+        return signed_val
+
+
+def generate_arm_candidate(rng: Union[secrets.SystemRandom, random.Random]) -> int:
+    """
+    Generate random 32-bit value from ARM Thumb-2 single-instruction loadable set.
+
+    Generates from:
+    - MOVW range: 65,536 values (80% probability - largest set)
+    - MOV modified immediate: ~1,024 values (10% probability)
+    - MVN modified immediate: ~1,024 values (10% probability)
+
+    Args:
+        rng: Random number generator
+
+    Returns:
+        Random 32-bit value loadable with single ARM Thumb-2 32-bit instruction
+    """
+    choice = rng.random()
+
+    if choice < 0.8:
+        # MOVW: 16-bit immediate zero-extended (most common)
+        return rng.randint(0, 0xFFFF)
+    elif choice < 0.9:
+        # MOV with modified immediate: random encoding
+        imm12 = rng.randint(0, 4095)
+        return expand_arm_modified_immediate(imm12)
+    else:
+        # MVN: bitwise NOT of modified immediate
+        imm12 = rng.randint(0, 4095)
+        value = expand_arm_modified_immediate(imm12)
+        return (~value) & 0xFFFFFFFF
+
+
+def generate_arch_candidate_from_set(valid_set: set,
+                                     rng: Union[secrets.SystemRandom, random.Random]) -> int:
+    """
+    Generate random candidate by uniformly sampling from pre-computed valid set.
+
+    This is slower than specialized generators but ensures uniform distribution.
+
+    Args:
+        valid_set: Pre-computed set of valid values
+        rng: Random number generator
+
+    Returns:
+        Random value from valid set
+    """
+    # Convert set to list for random access (cached by caller for efficiency)
+    valid_list = list(valid_set)
+    return rng.choice(valid_list)
+
+
 def find_best_candidate(existing: List[int], bit_width: int,
                         min_required_distance: int,
                         candidates_per_round: int,
                         rng: Union[secrets.SystemRandom, random.Random],
                         check_weak: bool = True,
                         check_clustering: bool = False,
-                        min_distribution_score: float = 40.0) -> Optional[int]:
+                        min_distribution_score: float = 40.0,
+                        arch_mode: Optional[str] = None,
+                        arch_valid_set: Optional[set] = None) -> Optional[int]:
     """
     Find the best candidate constant that maximizes minimum distance.
 
     Optionally also considers bit difference clustering to prefer
     candidates with well-distributed differences.
+
+    Architecture constraints (if arch_mode specified):
+    - Generates only values loadable with single instruction
+    - Validates against pre-computed valid set if provided
 
     Args:
         existing: List of existing constants
@@ -1001,6 +1364,8 @@ def find_best_candidate(existing: List[int], bit_width: int,
         check_weak: Whether to reject weak patterns
         check_clustering: Whether to check bit difference clustering
         min_distribution_score: Minimum distribution score (0-100) when check_clustering=True
+        arch_mode: Architecture mode ('riscv', 'arm', or None)
+        arch_valid_set: Pre-computed set of valid values for architecture
 
     Returns:
         Best candidate or None if none meets requirements
@@ -1011,7 +1376,18 @@ def find_best_candidate(existing: List[int], bit_width: int,
     max_val = (1 << bit_width) - 1
 
     for _ in range(candidates_per_round):
-        candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak)
+        # Generate candidate based on architecture mode
+        if arch_mode == 'riscv':
+            candidate = generate_riscv_candidate(rng)
+        elif arch_mode == 'arm':
+            candidate = generate_arm_candidate(rng)
+        else:
+            # Standard generation (no architecture constraints)
+            candidate = generate_balanced_constant(bit_width, rng, check_weak=check_weak)
+
+        # Validate against architecture constraints if set provided
+        if arch_valid_set is not None and candidate not in arch_valid_set:
+            continue
 
         # Skip if duplicate
         if candidate in existing:
@@ -1074,9 +1450,16 @@ def generate_constants(bit_width: int,
                       seed: Optional[int] = None,
                       check_weak: bool = True,
                       check_clustering: bool = False,
-                      min_distribution_score: float = 40.0) -> GenerationResult:
+                      min_distribution_score: float = 40.0,
+                      arch_mode: Optional[str] = None,
+                      arch_valid_set: Optional[set] = None) -> GenerationResult:
     """
     Generate a set of constants with specified minimum Hamming distance.
+
+    Architecture constraints (if arch_mode specified):
+    - All generated constants will be loadable with single instruction
+    - For RISC-V: ~1M valid values (0.024% of 2^32)
+    - For ARM: ~67k valid values (0.0016% of 2^32)
 
     Args:
         bit_width: Bit width of constants (8-64)
@@ -1088,6 +1471,8 @@ def generate_constants(bit_width: int,
         check_weak: Whether to reject weak patterns (default: True)
         check_clustering: Whether to check bit difference clustering (default: False)
         min_distribution_score: Minimum distribution score when check_clustering=True (default: 40.0)
+        arch_mode: Architecture mode ('riscv', 'arm', or None for unconstrained)
+        arch_valid_set: Pre-computed set of valid values (optional, for validation)
 
     Returns:
         GenerationResult with constants and statistics
@@ -1105,7 +1490,12 @@ def generate_constants(bit_width: int,
         constants = []
 
         # Generate first constant
-        constants.append(generate_balanced_constant(bit_width, rng, check_weak=check_weak))
+        if arch_mode == 'riscv':
+            constants.append(generate_riscv_candidate(rng))
+        elif arch_mode == 'arm':
+            constants.append(generate_arm_candidate(rng))
+        else:
+            constants.append(generate_balanced_constant(bit_width, rng, check_weak=check_weak))
 
         # Greedily add remaining constants
         success = True
@@ -1114,7 +1504,9 @@ def generate_constants(bit_width: int,
                 constants, bit_width, min_required_distance,
                 candidates_per_round, rng, check_weak=check_weak,
                 check_clustering=check_clustering,
-                min_distribution_score=min_distribution_score
+                min_distribution_score=min_distribution_score,
+                arch_mode=arch_mode,
+                arch_valid_set=arch_valid_set
             )
 
             if candidate is None:
@@ -1166,7 +1558,9 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
                               seed: Optional[int] = None,
                               check_weak: bool = True,
                               check_clustering: bool = False,
-                              min_distribution_score: float = 40.0) -> Tuple[int, GenerationResult]:
+                              min_distribution_score: float = 40.0,
+                              arch_mode: Optional[str] = None,
+                              arch_valid_set: Optional[set] = None) -> Tuple[int, GenerationResult]:
     """
     Auto-discover the maximum achievable minimum distance.
 
@@ -1181,6 +1575,8 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
         check_weak: Whether to reject weak patterns
         check_clustering: Whether to check bit difference clustering
         min_distribution_score: Minimum distribution score when check_clustering=True
+        arch_mode: Architecture mode ('riscv', 'arm', or None)
+        arch_valid_set: Pre-computed set of valid values
 
     Returns:
         Tuple of (achieved_distance, generation_result)
@@ -1188,8 +1584,14 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
     # Get theoretical maximum as starting point
     theoretical_max, bound_name = calculate_theoretical_max_distance(bit_width, num_constants)
 
-    print(f"Auto-discovery mode: Theoretical maximum is d ≤ {theoretical_max} ({bound_name} bound)")
-    print(f"Searching for maximum achievable distance...\n")
+    if arch_mode:
+        print(f"Auto-discovery mode with {arch_mode.upper()} constraints:")
+        print(f"Valid set size: {len(arch_valid_set) if arch_valid_set else 'unknown'} values")
+        print(f"Unconstrained theoretical maximum is d ≤ {theoretical_max} ({bound_name} bound)")
+        print(f"Searching for maximum achievable distance with architecture constraints...\n")
+    else:
+        print(f"Auto-discovery mode: Theoretical maximum is d ≤ {theoretical_max} ({bound_name} bound)")
+        print(f"Searching for maximum achievable distance...\n")
 
     # Try from theoretical max down to 1
     for target_distance in range(theoretical_max, 0, -1):
@@ -1204,7 +1606,9 @@ def auto_discover_max_distance(bit_width: int, num_constants: int,
             seed=seed,
             check_weak=check_weak,
             check_clustering=check_clustering,
-            min_distribution_score=min_distribution_score
+            min_distribution_score=min_distribution_score,
+            arch_mode=arch_mode,
+            arch_valid_set=arch_valid_set
         )
 
         if result.success:
@@ -1650,7 +2054,9 @@ def print_results(result: GenerationResult, bit_width: int,
                  show_bounds: bool = False, auto_mode: bool = False,
                  output_format: str = "default", prefix: str = "SECURE_CONST",
                  show_clustering: bool = False, clustering_threshold: float = 60.0,
-                 show_histogram: bool = False):
+                 show_histogram: bool = False,
+                 arch_mode: Optional[str] = None,
+                 arch_valid_set: Optional[set] = None):
     """
     Print generation results in a formatted way.
 
@@ -1665,6 +2071,9 @@ def print_results(result: GenerationResult, bit_width: int,
         prefix: Prefix for C constant names
         show_clustering: Whether to show bit difference clustering analysis
         clustering_threshold: Score threshold for flagging pairs (default: 60.0)
+        show_histogram: Whether to show bit difference histogram
+        arch_mode: Architecture mode ('riscv', 'arm', or None)
+        arch_valid_set: Pre-computed set of valid values
     """
     if not result.success:
         if min_required_distance is not None:
@@ -1711,6 +2120,27 @@ def print_results(result: GenerationResult, bit_width: int,
     print(f"  Maximum distance: {result.max_distance}")
     print(f"  Average distance: {result.avg_distance:.2f}")
     print(f"{'='*70}\n")
+
+    # Print architecture-specific instruction encodings
+    if arch_mode:
+        print(f"{'='*70}")
+        print(f"Architecture: {arch_mode.upper()} - Single-Instruction Loadable")
+        print(f"{'='*70}")
+        if arch_valid_set:
+            print(f"Valid set size: {len(arch_valid_set):,} values ({len(arch_valid_set)/2**32*100:.4f}% of 2^32)")
+        print(f"\nInstruction encodings:")
+
+        if arch_mode == 'riscv':
+            desc_fn = describe_riscv_instruction
+        else:  # arm
+            desc_fn = describe_arm_instruction
+
+        for i, const in enumerate(result.constants):
+            instr = desc_fn(const)
+            print(f"  [{i:2d}]  0x{const:08X}  →  {instr}")
+
+        print(f"\n✓ All {len(result.constants)} constants loadable in single {arch_mode.upper()} instruction")
+        print(f"{'='*70}\n")
 
     # Check for weak patterns
     weak_patterns = check_set_for_weak_patterns(result.constants, bit_width)
@@ -1812,6 +2242,12 @@ Examples:
     Output in C enum format:
       %(prog)s -b 32 -c 10 --format c-enum
 
+    Generate RISC-V RV32I single-instruction loadable constants:
+      %(prog)s -b 32 -c 10 --arch riscv
+
+    Generate ARM Thumb-2 single-instruction loadable constants:
+      %(prog)s -b 32 -c 10 --arch arm
+
   Verification mode:
     Verify constants from file (auto-detect bit width):
       %(prog)s --verify constants.txt
@@ -1860,8 +2296,24 @@ Examples:
                        help='Show detailed bit difference clustering analysis in output')
     parser.add_argument('--show-histogram', action='store_true',
                        help='Show bit difference distribution histogram and heatmap')
+    parser.add_argument('--arch', type=str, choices=['riscv', 'arm'],
+                       help='Architecture constraint: generate only single-instruction loadable constants (riscv=RV32I, arm=Thumb-2)')
 
     args = parser.parse_args()
+
+    # Architecture mode setup
+    arch_mode = args.arch if hasattr(args, 'arch') else None
+    arch_valid_set = None
+
+    if arch_mode:
+        # Pre-compute valid set for architecture
+        print(f"Architecture mode: {arch_mode.upper()}")
+        print(f"Pre-computing valid instruction set... ", end='', flush=True)
+        if arch_mode == 'riscv':
+            arch_valid_set = precompute_riscv_valid_set()
+        elif arch_mode == 'arm':
+            arch_valid_set = precompute_arm_valid_set()
+        print(f"done ({len(arch_valid_set):,} valid values)\n")
 
     # Verification mode
     if args.verify:
@@ -1929,7 +2381,9 @@ Examples:
             candidates_per_round=args.candidates,
             seed=args.seed,
             check_clustering=args.check_clustering,
-            min_distribution_score=args.min_distribution_score
+            min_distribution_score=args.min_distribution_score,
+            arch_mode=arch_mode,
+            arch_valid_set=arch_valid_set
         )
 
         if result.success:
@@ -1937,7 +2391,8 @@ Examples:
             print_results(result, args.bits, args.count, achieved_distance, args.show_bounds, auto_mode=True,
                          output_format=args.output_format, prefix=args.prefix,
                          show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score,
-                         show_histogram=args.show_histogram)
+                         show_histogram=args.show_histogram,
+                         arch_mode=arch_mode, arch_valid_set=arch_valid_set)
             return 0
         else:
             print(f"\nERROR: Failed to generate constants even with minimum distance requirements")
@@ -1955,14 +2410,17 @@ Examples:
             candidates_per_round=args.candidates,
             seed=args.seed,
             check_clustering=args.check_clustering,
-            min_distribution_score=args.min_distribution_score
+            min_distribution_score=args.min_distribution_score,
+            arch_mode=arch_mode,
+            arch_valid_set=arch_valid_set
         )
 
         # Print results
         print_results(result, args.bits, args.count, args.min_distance, args.show_bounds, auto_mode=False,
                      output_format=args.output_format, prefix=args.prefix,
                      show_clustering=args.show_clustering, clustering_threshold=args.min_distribution_score,
-                     show_histogram=args.show_histogram)
+                     show_histogram=args.show_histogram,
+                     arch_mode=arch_mode, arch_valid_set=arch_valid_set)
 
         # Return appropriate exit code
         return 0 if result.success else 1
